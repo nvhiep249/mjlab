@@ -1,8 +1,12 @@
+from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
 import torch
+import tyro
 
 from mjlab.scripts.gail_evaluate_expert import (
+  EvaluateExpertConfig,
   ExpertGate,
   build_command_grid,
   classify_successful_episodes,
@@ -11,6 +15,28 @@ from mjlab.scripts.gail_evaluate_expert import (
   refresh_fixed_command_observation,
   set_fixed_commands,
 )
+
+
+@pytest.mark.parametrize("role", ("expert", "baseline", "endpoint"))
+def test_evaluation_cli_accepts_role_without_changing_gate(role):
+  cfg = tyro.cli(
+    EvaluateExpertConfig,
+    args=[
+      "--checkpoint-file",
+      "model_999.pt",
+      "--output-file",
+      "evaluation.json",
+      "--evaluation-role",
+      role,
+    ],
+  )
+  assert cfg.evaluation_role == role
+  assert cfg.gate == ExpertGate()
+  assert not cfg.stochastic_policy
+  assert (
+    EvaluateExpertConfig(Path("model_999.pt"), Path("out.json")).evaluation_role
+    == "expert"
+  )
 
 
 def test_command_grid_is_complete_and_deterministic():

@@ -61,6 +61,8 @@ Changed
 Fixed
 ^^^^^
 
+- Kaggle evaluations label common PPO baseline and trained endpoints separately
+  from expert qualification, and print metrics and gate failure predicates.
 - Fixed-command expert collection and evaluation now pin commands through
   resampling and reset before actor observations are constructed.
 - Snapshot GAIL rollout commands so environment resets cannot relabel earlier

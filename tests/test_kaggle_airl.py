@@ -8,6 +8,7 @@ import math
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -75,6 +76,37 @@ def notebook_cell(cell_id: str) -> str:
   return "".join(
     next(cell["source"] for cell in notebook["cells"] if cell["id"] == cell_id)
   )
+
+
+def test_baseline_fail_is_reported_without_rejecting_qualified_dataset(
+  tmp_path, capsys
+):
+  common = tmp_path / "model_999.pt"
+  report = {"gate": {"passed": False, "failures": {"0": ["success_rate"]}}, "bins": []}
+  calls = []
+
+  def run(command, **kwargs):
+    calls.append(command)
+    output = Path(command[command.index("--output-file") + 1])
+    output.write_text(json.dumps(report))
+
+  namespace: dict[str, Any] = {
+    "subprocess": SimpleNamespace(run=run),
+    "json": json,
+    "os": os,
+    "SOURCE": tmp_path,
+    "COMMON": common,
+    "OUTPUT": tmp_path,
+    "SESSION": "test",
+    "manifest": {"task": cloud.TASK},
+    "GPU": 0,
+  }
+  exec(compile(notebook_cell("airl-07"), "baseline_evaluation", "exec"), namespace)
+  assert calls[0][calls[0].index("--evaluation-role") + 1] == "baseline"
+  assert namespace["baseline"]["gate"]["passed"] is False
+  assert "Common PPO baseline gate" in capsys.readouterr().out
+  namespace["evaluate"](common, tmp_path / "endpoint.json", 42006)
+  assert calls[-1][calls[-1].index("--evaluation-role") + 1] == "endpoint"
 
 
 @pytest.mark.parametrize(

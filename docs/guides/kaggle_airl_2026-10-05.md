@@ -64,8 +64,17 @@ Expert 382.726.465 bytes, SHA256
 `3cf8b910c4957fc80d257762d55945e5777411ba2785659dfb29dd08d69e72e8`.
 Common PPO 5.316.259 bytes, SHA256
 `b318a6da5db37a6795e4a943d0d52eaa75743bd403341ecf47b10b3f20972dc8`.
-Đây là hai artifact đã qualification; Dataset khác phải được audit trước khi đổi hashes.
+Expert đã qualification; common PPO được xác minh hash/provenance, không mặc định pass task gate.
+Dataset khác phải được audit trước khi đổi hashes.
 Expert metadata giữ teacher provenance; teacher không phải learner initializer.
+
+Baseline FAIL là kết quả đánh giá common PPO999, không phải đánh giá teacher/expert dataset.
+Evaluator hiện ghi rõ vai trò `baseline`/`endpoint`/`expert`, các metric và predicates fail.
+Giữ report baseline; nếu metrics hợp lệ, tiếp tục sweep và paired pilot từ cùng COMMON.
+Không hạ gate hoặc thay teacher vào một arm để làm baseline pass. Success95% nghĩa là
+ít nhất95/100 episodes cùng đạt tracking, upright và survival; mean RMSE tốt chưa đủ.
+Muốn chẩn đoán một FAIL cụ thể, đọc `gate.failures`, `bins`, `failure_breakdown`,
+checkpoint SHA và config của report đó; không suy từ seed/GPU/protocol khác.
 
 Cell order: input/hash → clone đúng branch/commit + source SHA256 → locked Python3.11/cu128
 bootstrap → PPO/AIRL1024env smoke5updates + AIRL resume1update → evaluate common base

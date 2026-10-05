@@ -7,7 +7,7 @@ import itertools
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import torch
 import tyro
@@ -37,6 +37,7 @@ class EvaluateExpertConfig:
   seed: int = 42
   device: str = "cuda:0"
   stochastic_policy: bool = False
+  evaluation_role: Literal["expert", "baseline", "endpoint"] = "expert"
   lin_vel_x: tuple[float, ...] = (-2.0, -1.0, 0.0, 1.0, 2.0, 3.0)
   lin_vel_y: tuple[float, ...] = (-1.0, 0.0, 1.0)
   ang_vel_z: tuple[float, ...] = (-0.7, 0.0, 0.7)
@@ -262,6 +263,7 @@ def run_evaluation(cfg: EvaluateExpertConfig) -> dict[str, object]:
     ]
     gate_result = evaluate_gate(gate_metrics, cfg.gate)
     result = {
+      "evaluation_role": cfg.evaluation_role,
       "expert_policy": "stochastic" if cfg.stochastic_policy else "deterministic",
       "checkpoint": str(cfg.checkpoint_file.resolve()),
       "checkpoint_sha256": _sha256(cfg.checkpoint_file),
@@ -273,7 +275,12 @@ def run_evaluation(cfg: EvaluateExpertConfig) -> dict[str, object]:
     cfg.output_file.write_text(
       json.dumps(result, indent=2, default=str), encoding="utf-8"
     )
-    print(f"[INFO] Expert gate: {'PASS' if gate_result['passed'] else 'FAIL'}")
+    print(
+      f"[INFO] {cfg.evaluation_role.capitalize()} gate: "
+      f"{'PASS' if gate_result['passed'] else 'FAIL'}"
+    )
+    print(f"[INFO] Gate failures: {json.dumps(gate_result['failures'])}")
+    print(f"[INFO] Metrics: {json.dumps(bins)}")
     print(f"[INFO] Report: {cfg.output_file}")
     return result
   finally:
