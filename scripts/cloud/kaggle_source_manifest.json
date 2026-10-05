@@ -2,6 +2,8 @@
   "task": "Mjlab-Velocity-Flat-Unitree-G1-AIRL-MVP",
   "hash_basis": "Git index blob bytes; clone with core.autocrlf=false",
   "source_files": {
+    "pyproject.toml": "1a70580775ceac5e934138675c3bffdd97cfcd60a25ba5b8a10d46ffda76bdb7",
+    "scripts/cloud/kaggle_airl.py": "61363ec0657efc93f5ba8cbb348d75265fe097e12336b6a4affdb4ddc8c101f6",
     "src/mjlab/__init__.py": "90e5703f949d94447fae9c93a140a4e769b124bff4294480b662730768be2b3e",
     "src/mjlab/actuator/__init__.py": "ae89d8f9cab9ab238a881597ec94f729feee7058b0d9773dca83000783a790df",
     "src/mjlab/actuator/actuator.py": "85c5744fe149d7a7886450f15e30317f4b01a3d2f1807730946fdd808e91716e",
@@ -129,6 +131,7 @@
     "src/mjlab/rl/airl.py": "1550b24bb4786a4519b1bcf9dab654734c6eff1e6ab8c64ac735eea6ff1ffab1",
     "src/mjlab/rl/config.py": "31672e703de275f5387385ccd92da3ae4fe663c792e1ea452d061487a906bc1f",
     "src/mjlab/rl/exporter_utils.py": "4841e3c17518e51286670d6e5e7ff11ec0faec12a6555216312d442f9c1c33be",
+    "src/mjlab/rl/frozen_airl.py": "c42b1232379b393b9db12a735d24599b653c662d142edd635f03a46b4a33014c",
     "src/mjlab/rl/gail.py": "30b451dc3668e462868d723a9e01bedfdfb734f88215c662fd8eb4dcd5cea6a0",
     "src/mjlab/rl/runner.py": "61e9200bf304e3df71096cd69f28f4d5973157e61cdc549fc21b6f156326f77e",
     "src/mjlab/rl/spatial_softmax.py": "413922be88fe797c528f59409f9975979cd1886d8ed51b17e28b9377ceadec7e",
@@ -137,6 +140,7 @@
     "src/mjlab/scene/scene.py": "ea3aaec0d501736084ba57a67fad089842dcdac0728dda5f098b44a3adddea11",
     "src/mjlab/scene/scene.xml": "0fa9355112e117328986cda47e4fbf4f5d47904b7fccb805d70dccaccdd038a4",
     "src/mjlab/scripts/_cli.py": "bcb1f4394126ee112578c905fb4ba89d8f8e67c9e7df55205e0c425ab3759219",
+    "src/mjlab/scripts/airl_export_reward.py": "e3a9c5c74f1e59b121baf48f8f76cbc422cc60b85c1ab74bf4550c2361961a15",
     "src/mjlab/scripts/csv_to_npz.py": "09095a5c70d4cdb85a64cdfa3a2f2eb0da573a44028d7c4e9a6d03a201529710",
     "src/mjlab/scripts/demo.py": "b20dec8c1e9c71fec5929294d242ea34a9e2fc7f81fb384346b13a5dcfa6917a",
     "src/mjlab/scripts/export_scene.py": "da4519902a6e31a7883105d596521fd4db0bb1a14f55764c603e944a2ee2469b",
@@ -271,8 +275,6 @@
     "src/mjlab/viewer/viser/scene.py": "107bbbf30da399289161c9815ed6dd53d4e2aa889f56eb32dde822f734bea0b2",
     "src/mjlab/viewer/viser/term_plotter.py": "4b2694fb5633fae6c01e71cf5e2c05a68ad2e5bbe6579f9339296572b6c5371d",
     "src/mjlab/viewer/viser/viewer.py": "8f11f8a13f6240178dcd5ea00df7ca387fe9e136cef839393d8ebfd93138b17e",
-    "pyproject.toml": "1a70580775ceac5e934138675c3bffdd97cfcd60a25ba5b8a10d46ffda76bdb7",
-    "uv.lock": "2e29f798316cf03af4e2eba8a40d24072b066d90302924f2310546dfc6e60713",
-    "scripts/cloud/kaggle_airl.py": "61363ec0657efc93f5ba8cbb348d75265fe097e12336b6a4affdb4ddc8c101f6"
+    "uv.lock": "2e29f798316cf03af4e2eba8a40d24072b066d90302924f2310546dfc6e60713"
   }
 }

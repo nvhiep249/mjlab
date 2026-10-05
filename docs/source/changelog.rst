@@ -8,6 +8,8 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Standalone AIRL reward export/load preserves g/h, gamma and normalization,
+  with fixed inference and a Kaggle README example adding f to task rewards.
 - Kaggle AIRL notebook clones a dedicated GitHub branch, verifies source and
   qualified expert/checkpoint hashes, and records the exact source commit.
 - Private Kaggle AIRL source bundles, isolated single-GPU environment/minibatch
@@ -45,6 +47,8 @@ Added
 Changed
 ^^^^^^^
 
+- The repository README explains Kaggle setup, continuation budgets, artifact
+  export and the boundary between online AIRL and frozen reward integration.
 - AIRL rollouts reuse PPO sample densities, reward component forwards, and normal
   preallocated transition storage while batching scalar diagnostics on the device.
 - Target-speed training can now progress through configurable forward-speed

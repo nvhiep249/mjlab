@@ -132,7 +132,7 @@ fresh khi missing checkpoint. Đổi SESSION/output để không ghi đè.
 Nhánh GitHub đã qua 178 focused tests, Ruff format/check, Ty, Pyright và
 `uv lock --check`. Windows không có make; đã chạy đúng các lệnh tương đương
 `make check`. Test thực thi clone branch/commit, từ chối source/data bị sửa và
-checkout tồn tại. Manifest 272 files khớp canonical Git index; absolute imports
+checkout tồn tại. Manifest source khớp canonical Git index; absolute imports
 đã được rà soát đầy đủ. CUDA RTX3050 smoke từ chính nhánh: PPO và AIRL mỗi arm
 64env ×24steps ×1update pass; đây chỉ là kiểm tra tích hợp, không so throughput.
 
@@ -151,11 +151,22 @@ Nhánh GitHub chứa source AIRL và dependency GAIL cần thiết; không mang 
 nhánh thử nghiệm vision. Kiểm tra clone thực tế, format/lint và hai type checkers
 được chạy trên checkout riêng trước khi push.
 
-Chưa bootstrap Linux, sweep16k+ hoặc train/evaluate trên Kaggle.
+Kết quả người dùng gửi từ Kaggle T4 đã chọn16384env/8minibatches:
+median11.933696s/update,32950.06 transitions/s, peak5065MiB/14911.6875MiB.
+Đây là JSON selection do người dùng cung cấp, chưa có đủ8candidate reports để
+kiểm tra lại thứ hạng hoặc endpoint của paired pilot. Chưa có kết quả frozen PPO.
 Chỉ kết luận tốc độ học bằng actual velocity, success, linear/yaw RMSE, upright,
 falls và per-seed evaluations. Gate giữ95%/0.25/0.20/0.97; evaluate base và endpoint
 100episodes trên42005/42006. Nếu base đã pass, time-to-gate=0; báo delta/stability.
 Continuation không chứng minh fresh training nhanh hơn.
+
+## Sau train: export và frozen reward
+
+[README](../../README.md) hướng dẫn chạy từng cell, export checkpoint AIRL bằng
+`uv run --no-sync python -m mjlab.scripts.airl_export_reward`, load standalone
+`FrozenAirlReward` và hook cộng `r_env + weight*f`. Export giữ g/h, gamma và mọi
+normalization buffer; không chứa PPO hoặc optimizer. Runner AIRL hiện vẫn online,
+chưa có launcher frozen AIRL: hook cần được tích hợp vào PPO rollout với D updates0.
 
 Nguồn backend: [MuJoCo Warp performance](https://mujoco.readthedocs.io/en/stable/mjwarp/index.html),
 [AIRL density API](https://imitation.readthedocs.io/en/latest/algorithms/airl.html),

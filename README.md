@@ -1,141 +1,218 @@
-![Project banner](https://raw.githubusercontent.com/mujocolab/mjlab/main/docs/source/_static/mjlab-banner.jpg)
+# mjlab — PPO + AIRL trên Kaggle và frozen reward
 
-# mjlab
+Quy trình cho Unitree G1: **clone GitHub → kiểm tra dữ liệu → smoke → benchmark → train PPO/AIRL cùng budget → evaluate → export discriminator → tích hợp frozen reward vào PPO**.
 
-[![GitHub Actions](https://img.shields.io/github/actions/workflow/status/mujocolab/mjlab/ci.yml?branch=main)](https://github.com/mujocolab/mjlab/actions/workflows/ci.yml?query=branch%3Amain)
-[![Documentation](https://github.com/mujocolab/mjlab/actions/workflows/docs.yml/badge.svg)](https://mujocolab.github.io/mjlab/)
-[![License](https://img.shields.io/github/license/mujocolab/mjlab)](https://github.com/mujocolab/mjlab/blob/main/LICENSE)
-[![MuJoCo Warp](https://img.shields.io/badge/MuJoCo_Warp-3.11.0-blue)](https://github.com/google-deepmind/mujoco_warp/releases/tag/v3.11.0)
-[![Nightly Benchmarks](https://img.shields.io/badge/Nightly-Benchmarks-blue)](https://mujocolab.github.io/mjlab/nightly/)
-[![PyPI](https://img.shields.io/pypi/v/mjlab)](https://pypi.org/project/mjlab/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/mjlab?color=blue)](https://pypistats.org/packages/mjlab)
+Notebook publish hiện là **continuation từ PPO999**, mặc định **60 updates bổ sung/arm tại 16.384 env**. Đây là pilot, chưa phải train mới từ đầu hoặc kết quả hội tụ. Export/load frozen AIRL đã có code độc lập; runner AIRL hiện vẫn cập nhật D online, chưa có launcher PPO frozen AIRL hoàn chỉnh.
 
-mjlab combines [Isaac Lab](https://github.com/isaac-sim/IsaacLab)'s manager-based API with [MuJoCo Warp](https://github.com/google-deepmind/mujoco_warp), a GPU-accelerated version of [MuJoCo](https://github.com/google-deepmind/mujoco).
-The framework provides composable building blocks for environment design,
-with minimal dependencies and direct access to native MuJoCo data structures.
+## 1. File và setup Kaggle
 
-## Getting Started
+| File | Mục đích |
+|---|---|
+| [kaggle_airl.ipynb](scripts/cloud/kaggle_airl.ipynb) | Import vào Kaggle; clone source từ GitHub |
+| [kaggle_airl.py](scripts/cloud/kaggle_airl.py) | CLI benchmark, chọn env/minibatches, train từng arm |
+| [kaggle_source_manifest.json](scripts/cloud/kaggle_source_manifest.json) | SHA256 source được kiểm tra sau clone |
+| [frozen_airl.py](src/mjlab/rl/frozen_airl.py) | Export/load và tính reward AIRL cố định |
+| [Hướng dẫn benchmark](docs/guides/kaggle_airl_2026-10-05.md) | VRAM math, phép đo và quy tắc chọn cấu hình |
+| [Hợp đồng dataset](docs/guides/airl_dataset_2026-10-01.md) | Expert, schema, qualification |
 
-mjlab requires an NVIDIA GPU for training. macOS is supported for evaluation only.
+1. Lấy notebook từ [branch `feature/kaggle-airl-16k`](https://github.com/nvhiep249/mjlab/tree/feature/kaggle-airl-16k), import vào Kaggle Notebook.
+2. Bật **Internet**, chọn **Tesla T4**, dùng một GPU (`GPU = 0`). Stack hiện tại không hỗ trợ P100; AIRL chưa đồng bộ D qua DDP nên không dùng hai GPU.
+3. Attach Dataset [nvhiep2409/airl-ppo](https://www.kaggle.com/datasets/nvhiep2409/airl-ppo), có đường dẫn `/kaggle/input/datasets/nvhiep2409/airl-ppo`.
 
-**Try it now:**
+Notebook tìm đệ quy hai file dưới đường dẫn trên:
 
-Run the demo (no installation needed):
+| Artifact | Tên chấp nhận | Bytes |
+|---|---|---:|
+| Expert đã qualify tại `(1.2, 0, 0)` | `airl_expert_1p2_deterministic_v1.pt` | 382726465 |
+| PPO chung khởi tạo hai arm | `ppo_common_999.pt` hoặc `model_999.pt` | 5316259 |
+
+Hash expert: `3cf8b910c4957fc80d257762d55945e5777411ba2785659dfb29dd08d69e72e8`.
+Hash PPO chung: `b318a6da5db37a6795e4a943d0d52eaa75743bd403341ecf47b10b3f20972dc8`.
+Tên trùng hoặc hash sai sẽ dừng trước train. Teacher tạo expert và PPO999 khởi tạo learner là hai checkpoint khác nhau. Không cần upload source ZIP; ZIP cũ trong Dataset không được dùng.
+
+Cell cấu hình:
+
+```python
+REPO_URL = "https://github.com/nvhiep249/mjlab.git"
+REPO_BRANCH = "feature/kaggle-airl-16k"
+REPO_COMMIT = None  # Hoặc full SHA để chạy lại đúng source.
+INPUT_ROOT = Path("/kaggle/input/datasets/nvhiep2409/airl-ppo")
+OUTPUT = Path("/kaggle/working/outputs")
+GPU = 0
+SESSION = "pilot01"  # Đổi tên khi chạy lượt mới, giữ output cũ.
+TRANSITIONS = 23592960  # Budget mỗi arm.
+```
+
+Source/venv ở `/tmp/mjlab-github-<SESSION>`, cache ở `/tmp/uv-cache`. Notebook clone branch, ghi commit thực tế vào `<SESSION>_github_source.json`, kiểm tra manifest, rồi bootstrap **Python 3.11**:
 
 ```bash
-uvx --from mjlab --refresh demo
+uv sync --locked --no-dev --extra cu128 --python 3.11
 ```
 
-Or try in [Google Colab](https://colab.research.google.com/github/mujocolab/mjlab/blob/main/notebooks/demo.ipynb) (no local setup required).
+Runtime T4 bạn đã gửi: Torch `2.9.0+cu128`, CUDA `12.8`, Warp `1.14.0`, MuJoCo/MuJoCo-Warp `3.11.0`, RSL-RL `5.5.0`. Preflight kiểm tra phép tính CUDA thật và Warp, không chỉ đọc `nvidia-smi`.
 
-**Install from source:**
+## 2. Thứ tự chạy và cách đọc kết quả
+
+| Bước | Việc làm | Output trong `/kaggle/working/outputs` |
+|---|---|---|
+| Input / clone / bootstrap | Xác minh data/source, tạo môi trường | `<SESSION>_github_source.json` |
+| Smoke | PPO/AIRL: 1024 env, 5 updates; AIRL resume thêm 1 | `<SESSION>_smoke_*` |
+| Baseline | PPO999 tại 1.2 m/s, 100 episodes | `<SESSION>_common_base_seed42005.json` |
+| Sweep | 4 mức env × 4/8 minibatches, 3 warmup + 8 measured updates/candidate | `<SESSION>_sweep/selected.json` và logs |
+| Paired pilot | Hai arm tuần tự, cùng COMMON, seed/config/budget | `<SESSION>_pilot_ppo`, `<SESSION>_pilot_airl` |
+| Endpoint | 100 episodes/seed/arm, seeds 42005 và 42006 | `<SESSION>_<arm>_eval_seed*.json` |
+| Export | Thêm cell ở mục 4, chỉ lấy checkpoint AIRL | `*_frozen_airl_reward.pt` |
+
+**Log `999–1005`** thuộc smoke vài updates, kế thừa nhãn iteration PPO999. Không có nghĩa D đã train 999 updates. Pilot chính ở cell sau sweep; đọc `run_summary.json`: `additional_updates` và `additional_transitions`.
+
+**`Expert gate: FAIL` ở baseline:** notebook cũ dùng chung nhãn evaluator. Code mới ghi `Baseline gate` và metric/failure predicates. FAIL của PPO999 không phải FAIL của teacher/expert dataset. Giữ JSON, đọc `gate.failures`, `bins`, `failure_breakdown` và checkpoint SHA. Nếu evaluation hoàn tất với metrics hợp lệ, tiếp tục hai arm từ cùng COMMON; không hạ gate hoặc thay teacher vào riêng một arm.
+
+Gate giữ success ≥95%, linear RMSE ≤0.25, yaw RMSE ≤0.20, upright ≥0.97. Dùng actual velocity, success, RMSE, upright và falls để kết luận chất lượng policy; reward hoặc D accuracy cao chưa chứng minh locomotion tốt.
+
+## 3. Env, tăng tốc và budget
+
+Sweep: `16384 / 20480 / 24576 / 32768` env, `4 / 8` minibatches; giữ **24 steps/env**, **5 PPO epochs**, **1 D update với batch tối đa 1024 learner + 1024 expert/update**. Chọn candidate >16000 env, ≥15% VRAM trống; trong 3% throughput nhanh nhất ưu tiên peak VRAM thấp hơn. Đây là tối ưu trong các cấu hình đã đo.
+
+Tăng tốc đã triển khai: reuse log-prob PPO khi rollout, tính g một lần cho reward/diagnostic, gom scalar logs trên GPU và tái sử dụng transition buffer. D minibatches vẫn tính current learner density; không đổi solver, validation hoặc tự scale LR. Đổi 4→8 minibatches tăng PPO optimizer steps 20→40/update, nên hai arm phải giữ cùng selection.
+
+Kết quả T4 bạn gửi chọn **16384 env, 8 minibatches**:
+
+```text
+rollout               = 16384 × 24 = 393216 transitions/update
+PPO minibatch         = 393216 / 8 = 49152 transitions
+median full update    = 11.933695996 s
+throughput            = 32950.060 transitions/s
+peak device memory    = 5065 / 14911.6875 MiB (~34%)
+pilot updates/arm     = 23592960 / 393216 = 60
+AIRL ước tính         = 60 × 11.933695996 ≈ 716 s (~12 phút)
+```
+
+Ước tính chưa gồm startup, checkpoint và evaluation; PPO cần đo riêng. Hai JSON giống nhau bạn gửi là cùng một kết quả in lặp. Chưa có endpoint paired pilot để kết luận AIRL học tốt hơn.
+
+Ở selection này, **1500 updates bổ sung/arm = 589824000 transitions/arm**; selection khác phải tính lại. Notebook hiện chặn chunk dự kiến >2 giờ: budget dài cần chia chunk cùng lịch cho hai arm, chưa có launcher tự động train dài chỉ bằng đổi một biến.
+
+Lưu checkpoint mỗi 50 updates và final. Chunk sau dùng checkpoint **riêng từng arm**, `--resume`, giữ selection/seed/config. AIRL resume khôi phục g/h, D optimizer, PPO và RNG; simulator reset, không khôi phục chính xác simulator state. AIRL checkpoint không dùng cho PPO control.
+
+## 4. Sau train: export discriminator AIRL
+
+Checkpoint chứa `checkpoint["infos"]["airl_state_dict"]`. Công thức online của repo:
+
+```text
+f = g(s,c) + gamma × (1 - terminated) × h(s_next,c_next) - h(s,c)
+logit_D = f - log_pi(a | actor_obs)
+r_total = r_env + lambda_D × f
+```
+
+Để giữ reward này khi frozen, export **cả g, h, gamma và normalization buffers**. Artifact không chứa actor/critic hoặc optimizer. Load gọi `eval()`, `requires_grad_(False)`, tính reward no-grad; không tính lại normalization. Giai đoạn frozen chỉ cập nhật PPO actor/critic, **D updates = 0**.
+
+Thêm cell sau train/evaluate trong notebook:
+
+```python
+summary = json.loads((OUTPUT / f"{SESSION}_pilot_airl/run_summary.json").read_text())
+checkpoint = max(
+  Path(summary["run_dir"]).glob("model_*.pt"),
+  key=lambda p: int(p.stem.split("_")[-1]),
+)
+frozen_file = OUTPUT / f"{SESSION}_frozen_airl_reward.pt"
+subprocess.run(
+  [
+    "uv",
+    "run",
+    "--no-sync",
+    "python",
+    "-m",
+    "mjlab.scripts.airl_export_reward",
+    "--checkpoint-file",
+    str(checkpoint),
+    "--output-file",
+    str(frozen_file),
+  ],
+  cwd=SOURCE,
+  check=True,
+)
+print("Source checkpoint:", checkpoint)
+print("Frozen reward:", frozen_file, "SHA256:", digest(frozen_file))
+```
+
+Cell chọn final checkpoint theo số iteration của run AIRL; không lấy smoke hoặc PPO control. Final không mặc định là D tốt nhất: giữ endpoint report và đánh giá reward alignment trước khi chọn donor để chạy frozen dài.
+
+CLI từ thư mục source đã clone:
 
 ```bash
-git clone https://github.com/mujocolab/mjlab.git && cd mjlab
-uv run demo
+uv run --no-sync python -m mjlab.scripts.airl_export_reward \
+  --checkpoint-file /duong/dan/airl/model_1058.pt \
+  --output-file /kaggle/working/outputs/pilot01_frozen_airl_reward.pt
 ```
 
-For alternative installation methods (PyPI, Docker), see the [Installation Guide](https://mujocolab.github.io/mjlab/main/source/installation.html).
+`model_1058.pt` chỉ là ví dụ; dùng path thực tế từ summary. Export không ghi đè, không sửa checkpoint nguồn và từ chối PPO/GAIL. Chỉ export checkpoint nguồn tin cậy do bạn tạo. Metadata ghi schema, contract, architecture, weight, SHA checkpoint/dataset. Artifact standalone load bằng `weights_only=True`; không cần expert dataset hoặc teacher để tính reward.
 
-## Training Examples
+## 5. Nạp frozen reward và cộng vào reward có sẵn
 
-### 1. Velocity Tracking
+Mỗi g/h nhận **68-D body-local state + 3-D command**; không phải actor observation 99-D hoặc GAIL state-action 100-D. `f` có thể âm. Không thêm sigmoid/softplus hoặc dùng `logit_D` làm frozen reward.
 
-Train a Unitree G1 humanoid to follow velocity commands on flat terrain:
+Hook mẫu cho PPO rollout, với `env` là wrapper của runner:
+
+```python
+import torch
+from mjlab.rl.frozen_airl import FrozenAirlReward
+from mjlab.rl.gail import velocity_gail_state
+
+frozen = FrozenAirlReward.load(
+  "/kaggle/working/outputs/pilot01_frozen_airl_reward.pt", device="cuda:0"
+)
+weight = frozen.default_weight  # 0.01 hiện tại.
+base_env = env.unwrapped
+
+
+def capture(base_env):
+  return {
+    "observations": velocity_gail_state(base_env.scene["robot"]),
+    "commands": base_env.command_manager.get_command("twist"),
+  }
+
+
+base_env.set_transition_capture(capture)
+
+
+@torch.no_grad()
+def step_with_frozen_reward(actions):
+  current = {k: v.detach().clone() for k, v in capture(base_env).items()}
+  next_obs, r_env, dones, extras = env.step(actions)
+  successor = extras["transition"]  # Trước auto-reset.
+  r_frozen = frozen.reward(
+    current["observations"].to(frozen.device),
+    successor["observations"].to(frozen.device),
+    current["commands"].to(frozen.device),
+    successor["commands"].to(frozen.device),
+    successor["terminated"].to(frozen.device),
+  )
+  r_total = r_env.to(frozen.device) + weight * r_frozen
+  return next_obs, r_total, dones, extras
+```
+
+Trong PPO rollout, thay `env.step(actions)` bằng `step_with_frozen_reward(actions)` ở ngoài helper, đưa `r_total` vào `alg.process_env_step`. Log riêng `r_env`, `r_frozen`, `weight*r_frozen`. Tắt đường GAIL/AIRL online để không cộng hai lần hoặc cập nhật D. Frozen f không cần actions/log-prob; actions ở helper chỉ dùng để step simulator.
+
+**Đây là hook tích hợp, chưa phải lệnh train frozen PPO hoàn chỉnh.** Không dùng `airl.enabled=True` hoặc resume của runner online để gọi frozen: runner đó vẫn cập nhật D. So sánh PPO control với PPO + frozen reward cùng initialization, seed/config/budget; kiểm tra mọi parameter/buffer D không đổi.
+
+`terminated=True` tắt successor potential; timeout/truncated vẫn bootstrap. Dùng successor/next command trước reset, không dùng actor observation sau reset hoặc `dones` thay `terminated`. Giữ gamma đã export khớp gamma shaping dự định dùng. Task reward đã có dt scaling; không nhân f thêm dt để giả định tương đương online. Weight `0.01` không có nghĩa 1% reward; kiểm tra phân phối reward và task metrics trước khi chọn weight.
+
+Export dùng **f** để giữ công thức online của repo. Dùng riêng **g** cho transfer là phương án khác, cần triển khai/ghi mode và đánh giá riêng. Tham khảo [AIRL API](https://imitation.readthedocs.io/en/stable/_api/imitation.algorithms.adversarial.airl.html) (reward_train/reward_test) và [bài báo AIRL](https://arxiv.org/abs/1710.11248).
+
+## 6. Lưu output và kiểm tra
+
+Lưu `/kaggle/working/outputs` qua output notebook hoặc tải về/tạo Dataset để attach session sau. Giữ checkpoint **đầy đủ** cho online resume; frozen artifact không thay thế checkpoint resume. Nếu export sau cell output hashes, chạy lại cell đó để cập nhật `output_hashes.json`.
+
+Giữ source commit, hashes, `selected.json`, `run_summary.json`, YAML config, TensorBoard, baseline/endpoint reports và frozen artifact. Runtime/GPU/packages thay đổi thì sweep lại. Đổi SESSION/output cho chunk mới; `/tmp` không được coi là artifact đã lưu.
+
+Kiểm tra code từ checkout đúng source:
 
 ```bash
-uv run train Mjlab-Velocity-Flat-Unitree-G1 --env.scene.num-envs 4096
+uv run --no-sync pytest tests/test_frozen_airl.py tests/test_airl.py tests/test_airl_runner.py tests/test_kaggle_airl.py -q
+uv run --no-sync ruff check
+uv run --no-sync ty check
+uv run --no-sync pyright
 ```
 
-**Multi-GPU Training:** Scale to multiple GPUs using `--gpu-ids`:
+Tests xác minh export/load giữ đúng f, normalization bitwise, terminal/changing command, không gradients/thay đổi D, checkpoint nguồn không đổi, CLI và rejection checks. Chúng chưa chứng minh D frozen giúp PPO đi tốt hơn; cần chạy frozen PPO và task evaluation sau tích hợp hook.
 
-```bash
-uv run train Mjlab-Velocity-Flat-Unitree-G1 \
-  --gpu-ids "[0, 1]" \
-  --env.scene.num-envs 4096
-```
-
-See the [Distributed Training guide](https://mujocolab.github.io/mjlab/main/source/training/distributed_training.html) for details.
-
-Evaluate a policy while training (fetches latest checkpoint from Weights & Biases):
-
-```bash
-uv run play Mjlab-Velocity-Flat-Unitree-G1 --wandb-run-path your-org/mjlab/run-id
-```
-
-### 2. Motion Imitation
-
-Train a humanoid to mimic reference motions. See the [motion imitation guide](https://mujocolab.github.io/mjlab/main/source/training/motion_imitation.html) for preprocessing setup.
-
-```bash
-uv run train Mjlab-Tracking-Flat-Unitree-G1 --registry-name your-org/motions/motion-name --env.scene.num-envs 4096
-uv run play Mjlab-Tracking-Flat-Unitree-G1 --wandb-run-path your-org/mjlab/run-id
-```
-
-### 3. Sanity-check with Dummy Agents
-
-Use built-in agents to sanity check your MDP before training:
-
-```bash
-uv run play Mjlab-Your-Task-Id --agent zero  # Sends zero actions
-uv run play Mjlab-Your-Task-Id --agent random  # Sends uniform random actions
-```
-
-When running motion-tracking tasks, add `--registry-name your-org/motions/motion-name` to the command.
-
-
-## Documentation
-
-Full documentation is available at **[mujocolab.github.io/mjlab](https://mujocolab.github.io/mjlab/)**.
-
-## Development
-
-```bash
-make test          # Run all tests
-make test-fast     # Skip slow tests
-make format        # Format and lint
-make docs          # Build docs locally
-```
-
-For development setup: `uvx pre-commit install`
-
-## Citation
-
-mjlab is used in published research and open-source robotics projects. See the [Research](https://mujocolab.github.io/mjlab/main/source/research.html) page for publications and projects, or share your own in [Show and Tell](https://github.com/mujocolab/mjlab/discussions/categories/show-and-tell).
-
-If you use mjlab in your research, please consider citing:
-
-```bibtex
-@misc{zakka2026mjlablightweightframeworkgpuaccelerated,
-  title={mjlab: A Lightweight Framework for GPU-Accelerated Robot Learning},
-  author={Kevin Zakka and Qiayuan Liao and Brent Yi and Louis Le Lay and Koushil Sreenath and Pieter Abbeel},
-  year={2026},
-  eprint={2601.22074},
-  archivePrefix={arXiv},
-  primaryClass={cs.RO},
-  url={https://arxiv.org/abs/2601.22074},
-}
-```
-
-## License
-
-mjlab is licensed under the [Apache License, Version 2.0](LICENSE).
-
-### Third-Party Code
-
-Some portions of mjlab are forked from external projects:
-
-- **`src/mjlab/utils/lab_api/`** — Utilities forked from [NVIDIA Isaac
-  Lab](https://github.com/isaac-sim/IsaacLab) (BSD-3-Clause license, see file
-  headers)
-
-Forked components retain their original licenses. See file headers for details.
-
-## Acknowledgments
-
-mjlab wouldn't exist without the excellent work of the Isaac Lab team, whose API
-design and abstractions mjlab builds upon.
-
-Thanks to the MuJoCo Warp team — especially Erik Frey and Taylor Howell — for
-answering our questions, giving helpful feedback, and implementing features
-based on our requests countless times.
+Tài liệu framework gốc: [MuJoCo Lab](https://github.com/mujocolab/mjlab).
