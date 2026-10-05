@@ -2,13 +2,14 @@
 
 Quy trình cho Unitree G1: **clone GitHub → kiểm tra dữ liệu → smoke → benchmark → train PPO/AIRL cùng budget → evaluate → export discriminator → tích hợp frozen reward vào PPO**.
 
-Notebook publish hiện là **continuation từ PPO999**, mặc định **60 updates bổ sung/arm tại 16.384 env**. Đây là pilot, chưa phải train mới từ đầu hoặc kết quả hội tụ. Export/load frozen AIRL đã có code độc lập; runner AIRL hiện vẫn cập nhật D online, chưa có launcher PPO frozen AIRL hoàn chỉnh.
+Có hai notebook: **pilot60** và **train dài 1500 updates bổ sung/arm tại 16.384 env**, đều continuation từ PPO999. Train dài tự chia chunk, lưu state và nối session; chưa phải train mới từ đầu hoặc kết quả hội tụ. Export/load frozen AIRL đã có code độc lập; runner AIRL hiện vẫn cập nhật D online, chưa có launcher PPO frozen AIRL hoàn chỉnh.
 
 ## 1. File và setup Kaggle
 
 | File | Mục đích |
 |---|---|
-| [kaggle_airl.ipynb](scripts/cloud/kaggle_airl.ipynb) | Import vào Kaggle; clone source từ GitHub |
+| [kaggle_airl_long.ipynb](scripts/cloud/kaggle_airl_long.ipynb) | Train dài, chunk, resume qua session và export frozen reward |
+| [kaggle_airl.ipynb](scripts/cloud/kaggle_airl.ipynb) | Pilot60; clone source từ GitHub |
 | [kaggle_airl.py](scripts/cloud/kaggle_airl.py) | CLI benchmark, chọn env/minibatches, train từng arm |
 | [kaggle_source_manifest.json](scripts/cloud/kaggle_source_manifest.json) | SHA256 source được kiểm tra sau clone |
 | [frozen_airl.py](src/mjlab/rl/frozen_airl.py) | Export/load và tính reward AIRL cố định |
@@ -121,11 +122,57 @@ pilot updates/arm     = 23592960 / 393216 = 60
 AIRL ước tính         = 60 × 11.933695996 ≈ 716 s (~12 phút)
 ```
 
-Ước tính chưa gồm startup, checkpoint và evaluation; PPO cần đo riêng. Hai JSON giống nhau bạn gửi là cùng một kết quả in lặp. Chưa có endpoint paired pilot để kết luận AIRL học tốt hơn.
+Ước tính chưa gồm startup, checkpoint và evaluation; PPO cần đo riêng. Hai JSON giống nhau bạn gửi là cùng một kết quả in lặp. Endpoint AIRL seed42006 bạn gửi đạt 80/100: 18 episode fail linear RMSE, 2 fail yaw RMSE; không fall nhưng chưa đạt success95%. Đây là gate FAIL sau evaluation hoàn tất, không phải exception. Thiếu endpoint PPO cùng seed/budget nên chưa kết luận AIRL tốt hơn hay kém hơn.
 
-Ở selection này, **1500 updates bổ sung/arm = 589824000 transitions/arm**; selection khác phải tính lại. Notebook hiện chặn chunk dự kiến >2 giờ: budget dài cần chia chunk cùng lịch cho hai arm, chưa có launcher tự động train dài chỉ bằng đổi một biến.
+### Train dài và nối session
 
-Lưu checkpoint mỗi 50 updates và final. Chunk sau dùng checkpoint **riêng từng arm**, `--resume`, giữ selection/seed/config. AIRL resume khôi phục g/h, D optimizer, PPO và RNG; simulator reset, không khôi phục chính xác simulator state. AIRL checkpoint không dùng cho PPO control.
+Import [kaggle_airl_long.ipynb](scripts/cloud/kaggle_airl_long.ipynb) thay cho pilot notebook. Mặc định:
+
+```python
+SESSION = "long01"
+SEED = 42
+TRANSITIONS = 589824000  # Tổng transitions bổ sung mỗi arm.
+CHUNK_TRANSITIONS = 23592960  # Cùng lịch chunk cho PPO và AIRL.
+SESSION_SECONDS = 28800  # Budget train 8 giờ do notebook chọn.
+RESUME_STATE = None
+SELECTED_INPUT = None  # Có selection đã đo thì điền path để bỏ sweep.
+```
+
+Ở 16384 env: **1500 updates/arm = 25 chunks × 60**, từ COMMON PPO999; không tiếp tục pilot60 cũ. Giữ tổng transitions khi đổi selection: 20480/24576/32768 env tương ứng 1200/1000/750 updates. AIRL 1500 updates ước tính ~4.97 giờ từ phép đo bạn gửi, chưa gồm startup/checkpoint/evaluation; PPO chưa đo riêng, nên hai arm có thể cần nhiều session. `SESSION_SECONDS` không phải giới hạn chính thức của Kaggle.
+
+Nếu đang ở notebook pilot và đã có `SOURCE`, `COMMON`, `INPUT`, `SELECTED`, hãy pull source mới, kiểm tra manifest như mục recovery rồi thêm cell:
+
+```python
+cloud(
+  "paired",
+  "--input",
+  INPUT,
+  "--checkpoint",
+  COMMON,
+  "--selected",
+  SELECTED,
+  "--output",
+  OUTPUT / "long01_paired",
+  "--transitions",
+  589824000,
+  "--chunk-transitions",
+  23592960,
+  "--session-seconds",
+  28800,
+  "--seed",
+  42,
+  "--gpu",
+  GPU,
+)
+```
+
+Chỉ rerun cell train để nối tiến độ trong cùng runtime. State ở `/kaggle/working/outputs/long01_paired/paired_state.json`; CLI ưu tiên arm còn thiếu, tăng counters sau summary và checkpoint đã xác minh hash. Chunk lỗi/chưa commit được chạy lại từ checkpoint trước trong attempt mới; không tự nhận checkpoint chạy dở. `complete=False` báo còn budget, không phải policy hội tụ hay gate FAIL.
+
+Session sau: Save Version có outputs, attach **toàn bộ outputs cũ** làm Kaggle input; đổi `SESSION="long02"`, đặt `RESUME_STATE=Path("/kaggle/input/.../long01_paired/paired_state.json")`. Notebook tự pin source commit, giữ seed/target/chunk/selection và bỏ smoke/baseline/sweep. Giữ cùng expert dataset, GPU/runtime. Thư mục state phải có `initial.pt`, `selected.json`, JSON và checkpoint riêng của hai arm; chỉ tải JSON sẽ không resume được. Input chỉ đọc, checkpoint được copy sang output mới. Không import state cũ vào output đang có state khác; source/config/hash khác sẽ dừng trước chunk tiếp theo.
+
+Endpoint chỉ so khi hai arm có cùng số transitions đã commit; report partial ghi rõ budget. Export cuối tự chạy khi hoàn tất toàn budget, lấy checkpoint AIRL từ state. Giữ state/output ngay cả khi gate FAIL; train dài không bảo đảm gate sẽ PASS.
+
+Lưu checkpoint mỗi 50 updates và final. Chunk sau dùng checkpoint **riêng từng arm**, `--resume`, giữ selection/seed/config. AIRL resume khôi phục g/h, D optimizer, PPO và Torch CPU/CUDA RNG; PPO cloud checkpoint mới cũng lưu/khôi phục Torch RNG. Simulator reset mỗi chunk; Python/NumPy/Warp và simulator state không được restore chính xác, nên đây không phải rollout liên tục bitwise. AIRL checkpoint không dùng cho PPO control.
 
 ## 4. Sau train: export discriminator AIRL
 

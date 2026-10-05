@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import zipfile
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -30,6 +31,7 @@ DATASET = "airl_expert_1p2_deterministic_v1.pt"
 CHECKPOINT = "ppo_common_999.pt"
 ENVS = (16384, 20480, 24576, 32768)
 STEPS = 24
+PPO_RNG_KEYS = ("kaggle_torch_rng", "kaggle_cuda_rng")
 
 
 def sha256(path: Path) -> str:
@@ -222,6 +224,9 @@ def worker(args: argparse.Namespace) -> None:
   )
   if args.arm == "ppo" and "airl_state_dict" in checkpoint_infos:
     raise ValueError("PPO control cannot load an AIRL treatment checkpoint")
+  if args.arm == "ppo" and args.resume and args.require_rng:
+    if any(key not in checkpoint_infos for key in PPO_RNG_KEYS):
+      raise ValueError("Paired PPO resume requires a checkpoint with Torch RNG")
   config.env.scene.num_envs = args.envs
   config.agent.seed = args.seed
   config.agent.resume = args.resume
@@ -244,6 +249,8 @@ def worker(args: argparse.Namespace) -> None:
       if self.airl is None and args.resume:
         # RSL stores the last completed index; AIRL already restores next index.
         self.current_learning_iteration += 1
+        if all(key in checkpoint_infos for key in PPO_RNG_KEYS):
+          restore_ppo_rng(checkpoint_infos, self.device)
       return result
 
     def learn(self, *positional, **keywords):
@@ -265,9 +272,15 @@ def worker(args: argparse.Namespace) -> None:
       with patch.object(self.logger, "log", measured_log):
         return super().learn(*positional, **keywords)
 
-    def save(self, *positional, **keywords):
+    def save(self, path, infos=None):
       if not args.benchmark:
-        return super().save(*positional, **keywords)
+        if self.airl is None:
+          infos = {
+            **(infos or {}),
+            "kaggle_torch_rng": torch.get_rng_state(),
+            "kaggle_cuda_rng": torch.cuda.get_rng_state(self.device),
+          }
+        return super().save(path, infos)
 
   try:
     with patch.object(train, "load_runner_cls", return_value=MeasuredRunner):
@@ -355,6 +368,8 @@ def child_command(
     command.append("--benchmark")
   if args.resume:
     command.append("--resume")
+  if getattr(args, "require_rng", False):
+    command.append("--require-rng")
   if not benchmark and getattr(args, "selected", None) is not None:
     command.extend(("--selected", str(args.selected)))
   return command
@@ -376,7 +391,16 @@ def source_manifest_hash() -> str | None:
   return sha256(manifest) if manifest.is_file() else None
 
 
-def train_arm(args: argparse.Namespace) -> None:
+def restore_ppo_rng(infos: dict, device: str) -> None:
+  # Keep cloud orchestration/imports hardware-free until a worker needs Torch.
+  import torch
+
+  torch.set_rng_state(infos["kaggle_torch_rng"].cpu())
+  if torch.device(device).type == "cuda":
+    torch.cuda.set_rng_state(infos["kaggle_cuda_rng"].cpu(), device)
+
+
+def train_arm(args: argparse.Namespace, timeout: float | None = None) -> None:
   selected = json.loads(args.selected.read_text())
   if not selected.get("ok"):
     raise ValueError("A successful measured selection is required")
@@ -436,7 +460,306 @@ def train_arm(args: argparse.Namespace) -> None:
   command = child_command(
     args, selected["envs"], selected["minibatches"], output, result, updates, False
   )
-  subprocess.run(command, check=True)
+  subprocess.run(command, check=True, timeout=timeout)
+
+
+def atomic_json(path: Path, data: dict) -> None:
+  temporary = path.with_suffix(path.suffix + ".tmp")
+  write_json(temporary, data)
+  temporary.replace(path)
+
+
+def copy_verified(source: Path, target: Path, digest: str) -> None:
+  if not source.is_file() or sha256(source) != digest:
+    raise ValueError(f"Missing or changed checkpoint/artifact: {source}")
+  if target.exists():
+    if sha256(target) != digest:
+      raise ValueError(f"Refusing to replace a different artifact: {target}")
+    return
+  temporary = target.with_suffix(target.suffix + ".tmp")
+  shutil.copyfile(source, temporary)
+  if sha256(temporary) != digest:
+    raise ValueError(f"Checkpoint copy hash mismatch: {temporary}")
+  temporary.replace(target)
+
+
+def state_artifact(folder: Path, name: str, digest: str) -> Path:
+  if not isinstance(name, str) or not name or Path(name).name != name:
+    raise ValueError("Paired checkpoint references must be flat relative filenames")
+  path = folder / name
+  if not path.resolve().is_relative_to(folder.resolve()):
+    raise ValueError("Paired artifact escapes its state directory")
+  if not path.is_file() or sha256(path) != digest:
+    raise ValueError(f"Missing or changed paired artifact: {path}")
+  return path
+
+
+@contextmanager
+def paired_writer(folder: Path):
+  folder.mkdir(parents=True, exist_ok=True)
+  lock = folder / ".paired.lock"
+  try:
+    stream = lock.open("x", encoding="utf-8")
+  except FileExistsError as error:
+    raise FileExistsError(
+      f"Paired writer active or stale lock: {lock}. After the old process stops, "
+      "use --state paired_state.json with a new --output directory."
+    ) from error
+  try:
+    with stream:
+      stream.write(str(os.getpid()))
+    yield
+  finally:
+    lock.unlink()
+
+
+def paired(args: argparse.Namespace) -> None:
+  if not math.isfinite(args.session_seconds) or args.session_seconds <= 0:
+    raise ValueError("session_seconds must be finite and positive")
+  started = time.perf_counter()
+  destination = args.output / "paired_state.json"
+  original_state_hash = sha256(destination) if destination.exists() else None
+  if args.state is not None and destination.exists():
+    if args.state.resolve() != destination.resolve():
+      raise FileExistsError("Import --state into a new --output directory")
+  source_state = args.state or (destination if destination.exists() else None)
+  state = json.loads(source_state.read_text()) if source_state is not None else None
+  if state is not None and state.get("format") != "mjlab_paired_train_v1":
+    raise ValueError("Unsupported paired state format")
+  source_folder = source_state.parent if source_state is not None else args.output
+  selection_file = args.selected or source_folder / "selected.json"
+  selected = json.loads(selection_file.read_text())
+  if not selected.get("ok") or selected["envs"] <= 16000:
+    raise ValueError("Paired training requires a successful >16000-env selection")
+  if not math.isfinite(selected["median_update_seconds"]) or (
+    selected["median_update_seconds"] <= 0
+  ):
+    raise ValueError("Selection timing must be finite and positive")
+  update_count(args.transitions, selected["envs"])
+  update_count(args.chunk_transitions, selected["envs"])
+  manifest_hash = source_manifest_hash()
+  if manifest_hash is None:
+    raise ValueError("Paired training requires the verified GitHub source manifest")
+  initializer = args.checkpoint
+  if initializer is None:
+    initializer = (
+      source_folder / "initial.pt" if state is not None else args.input / CHECKPOINT
+    )
+  config = {
+    "task": TASK,
+    "envs": selected["envs"],
+    "minibatches": selected["minibatches"],
+    "steps": STEPS,
+    "seed": args.seed,
+    "target_transitions": args.transitions,
+    "chunk_transitions": args.chunk_transitions,
+    "initial_checkpoint_sha256": sha256(initializer),
+    "dataset_sha256": sha256(args.input / DATASET),
+    "source_manifest_sha256": manifest_hash,
+    "runtime": {
+      key: selected[key] for key in ("gpu", "cuda", "packages", "total_device_mib")
+    },
+  }
+  with paired_writer(args.output):
+    current_hash = sha256(destination) if destination.exists() else None
+    if current_hash != original_state_hash:
+      raise ValueError("Paired state changed before lock acquisition; rerun command")
+    if state is None:
+      if any(path.name != ".paired.lock" for path in args.output.iterdir()):
+        raise FileExistsError("No paired state in existing output; choose a new output")
+      state = {
+        "format": "mjlab_paired_train_v1",
+        "source_commit": subprocess.check_output(
+          ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip(),
+        "config": config,
+        "selected_sha256": sha256(selection_file),
+        "complete": False,
+        "arms": {
+          arm: {
+            "transitions": 0,
+            "checkpoint": "initial.pt",
+            "checkpoint_sha256": config["initial_checkpoint_sha256"],
+            "wall_seconds": 0.0,
+          }
+          for arm in ("ppo", "airl")
+        },
+        "history": [],
+        "failed_attempts": [],
+      }
+      copy_verified(initializer, args.output / "initial.pt", sha256(initializer))
+      copy_verified(
+        selection_file, args.output / "selected.json", sha256(selection_file)
+      )
+    else:
+      if state["config"] != config:
+        raise ValueError(
+          "Paired config/data/source/runtime changed; restore saved config"
+        )
+      if sha256(selection_file) != state["selected_sha256"]:
+        raise ValueError("Paired selection hash changed; use saved selected.json")
+      if set(state["arms"]) != {"ppo", "airl"}:
+        raise ValueError("Paired state must contain exactly PPO and AIRL")
+      if any(item["arm"] not in ("ppo", "airl") for item in state["history"]):
+        raise ValueError("Invalid paired history arm")
+      cached = state_artifact(source_folder, "selected.json", state["selected_sha256"])
+      copy_verified(cached, args.output / "selected.json", state["selected_sha256"])
+      initial = state_artifact(
+        source_folder, "initial.pt", config["initial_checkpoint_sha256"]
+      )
+      copy_verified(initial, args.output / "initial.pt", sha256(initial))
+      for arm in ("ppo", "airl"):
+        row = state["arms"][arm]
+        if not math.isfinite(row["wall_seconds"]) or row["wall_seconds"] < 0:
+          raise ValueError("Invalid paired wall time")
+        count = row["transitions"]
+        if (
+          type(count) is not int
+          or not 0 <= count <= args.transitions
+          or (count % (selected["envs"] * STEPS))
+        ):
+          raise ValueError("Invalid paired transition counter")
+        history = [item for item in state["history"] if item["arm"] == arm]
+        if count == 0 and (
+          row["checkpoint"] != "initial.pt"
+          or row["checkpoint_sha256"] != config["initial_checkpoint_sha256"]
+        ):
+          raise ValueError("Zero-count arm must use the common initializer")
+        if any(
+          type(item["transitions"]) is not int
+          or item["transitions"] <= 0
+          or item["transitions"] > args.chunk_transitions
+          or item["updates"] != update_count(item["transitions"], selected["envs"])
+          or item["resume"] != (index > 0)
+          for index, item in enumerate(history)
+        ):
+          raise ValueError("Invalid paired chunk history")
+        if sum(item["transitions"] for item in history) != count:
+          raise ValueError("Paired history/counter mismatch")
+        if history and (
+          history[-1]["checkpoint_sha256"] != row["checkpoint_sha256"]
+          or history[-1]["checkpoint"] != row["checkpoint"]
+        ):
+          raise ValueError("Paired checkpoint/history mismatch")
+        checkpoint = state_artifact(
+          source_folder, row["checkpoint"], row["checkpoint_sha256"]
+        )
+        copy_verified(
+          checkpoint, args.output / row["checkpoint"], row["checkpoint_sha256"]
+        )
+    counts = [state["arms"][arm]["transitions"] for arm in ("ppo", "airl")]
+    if max(counts) - min(counts) > args.chunk_transitions:
+      raise ValueError("Paired arms differ by more than one chunk")
+    state["complete"] = all(count == args.transitions for count in counts)
+    atomic_json(destination, state)
+    while not state["complete"]:
+      arm = min(("ppo", "airl"), key=lambda name: state["arms"][name]["transitions"])
+      row = state["arms"][arm]
+      amount = min(args.chunk_transitions, args.transitions - row["transitions"])
+      updates = update_count(amount, selected["envs"])
+      remaining = args.session_seconds - (time.perf_counter() - started)
+      estimate = updates * selected["median_update_seconds"] * 1.2 + 120
+      if remaining < estimate:
+        print(f"[INFO] Session budget reached; next arm={arm}. Resume {destination}")
+        break
+      parent = args.output / "chunks" / f"t{row['transitions']:012d}" / arm
+      attempt = 1
+      while (parent / f"attempt_{attempt:03d}").exists():
+        attempt += 1
+      job_output = parent / f"attempt_{attempt:03d}"
+      checkpoint = state_artifact(
+        args.output, row["checkpoint"], row["checkpoint_sha256"]
+      )
+      job = argparse.Namespace(
+        input=args.input,
+        checkpoint=checkpoint,
+        selected=args.output / "selected.json",
+        output=job_output,
+        arm=arm,
+        gpu=args.gpu,
+        seed=args.seed,
+        transitions=amount,
+        resume=row["transitions"] > 0,
+        require_rng=True,
+        reuse_completed=False,
+        restart_incomplete=False,
+      )
+      print(
+        f"[INFO] Long {arm}: +{updates} updates; committed={row['transitions']} transitions",
+        flush=True,
+      )
+      job_started = time.perf_counter()
+      try:
+        train_arm(job, timeout=remaining)
+      except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        state["failed_attempts"].append(
+          {
+            "arm": arm,
+            "output": str(job_output),
+            "error": type(error).__name__,
+            "wall_seconds": time.perf_counter() - job_started,
+          }
+        )
+        atomic_json(destination, state)
+        if isinstance(error, subprocess.TimeoutExpired):
+          print(f"[INFO] Chunk timed out; committed state preserved: {destination}")
+          break
+        raise
+      result = json.loads((job_output / "run_summary.json").read_text())
+      expected = {
+        "ok": True,
+        "arm": arm,
+        "envs": selected["envs"],
+        "minibatches": selected["minibatches"],
+        "seed": args.seed,
+        "resume": job.resume,
+        "checkpoint_sha256": row["checkpoint_sha256"],
+        "additional_updates": updates,
+        "additional_transitions": amount,
+        "source_manifest_sha256": manifest_hash,
+        "dataset_sha256": config["dataset_sha256"] if arm == "airl" else None,
+      }
+      if any(result.get(key) != value for key, value in expected.items()):
+        raise ValueError("Long chunk summary/config mismatch; state not advanced")
+      timings = result.get("update_seconds", [])
+      if len(timings) != updates or any(
+        not math.isfinite(value) or value <= 0 for value in timings
+      ):
+        raise ValueError(
+          "Chunk has incomplete/nonfinite update timing; state not advanced"
+        )
+      validate_selection_runtime(result, selected)
+      run_dir = Path(result["run_dir"])
+      if not run_dir.resolve().is_relative_to(job_output.resolve()):
+        raise ValueError("Chunk checkpoint escaped its output")
+      final = latest_checkpoint(run_dir)
+      digest = result["final_checkpoint_sha256"]
+      total = row["transitions"] + amount
+      name = f"{arm}_{total:012d}_{digest[:12]}.pt"
+      copy_verified(final, args.output / name, digest)
+      elapsed = time.perf_counter() - job_started
+      row.update(
+        transitions=total,
+        checkpoint=name,
+        checkpoint_sha256=digest,
+        wall_seconds=row["wall_seconds"] + elapsed,
+      )
+      state["history"].append(
+        {
+          "arm": arm,
+          "transitions": amount,
+          "updates": updates,
+          "resume": job.resume,
+          "checkpoint": name,
+          "checkpoint_sha256": digest,
+          "wall_seconds": elapsed,
+        }
+      )
+      state["complete"] = all(
+        r["transitions"] == args.transitions for r in state["arms"].values()
+      )
+      atomic_json(destination, state)
+    print(f"[INFO] Long training complete={state['complete']}; state={destination}")
 
 
 def sweep(args: argparse.Namespace) -> None:
@@ -537,9 +860,24 @@ def main() -> None:
       command.add_argument("--updates", type=int, required=True)
       command.add_argument("--result", type=Path, required=True)
       command.add_argument("--benchmark", action="store_true")
+      command.add_argument("--require-rng", action="store_true")
+  long_train = commands.add_parser("paired")
+  long_train.add_argument("--input", type=Path, required=True)
+  long_train.add_argument("--checkpoint", type=Path)
+  long_train.add_argument("--selected", type=Path)
+  long_train.add_argument("--output", type=Path, required=True)
+  long_train.add_argument("--state", type=Path)
+  long_train.add_argument("--transitions", type=int, default=589824000)
+  long_train.add_argument("--chunk-transitions", type=int, default=23592960)
+  long_train.add_argument("--session-seconds", type=float, default=28800)
+  long_train.add_argument("--gpu", type=int, default=0)
+  long_train.add_argument("--seed", type=int, default=42)
   args = parser.parse_args()
   if args.command == "pack":
     pack(args.output, args.dataset, args.checkpoint)
+    return
+  if args.command == "paired":
+    paired(args)
     return
   args.checkpoint = args.checkpoint or args.input / CHECKPOINT
   if args.command == "worker":

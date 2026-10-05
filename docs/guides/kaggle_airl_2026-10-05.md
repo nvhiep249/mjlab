@@ -177,3 +177,23 @@ chưa có launcher frozen AIRL: hook cần được tích hợp vào PPO rollout
 Nguồn backend: [MuJoCo Warp performance](https://mujoco.readthedocs.io/en/stable/mjwarp/index.html),
 [AIRL density API](https://imitation.readthedocs.io/en/latest/algorithms/airl.html),
 [PyTorch cu128 architecture support](https://dev-discuss.pytorch.org/t/cuda-toolkit-version-and-architecture-support-update-maxwell-and-pascal-architecture-support-removed-in-cuda-12-8-and-12-9-builds/3128).
+
+
+## Train dài theo chunk
+
+Notebook `scripts/cloud/kaggle_airl_long.ipynb` dùng CLI `paired`: 589824000
+transitions/arm, chunk23592960, seed42, COMMON PPO999. Ở16384 env tương ứng
+1500 updates bổ sung/arm, 25 chunks60. PPO cập nhật actor/critic; AIRL thêm g/h.
+State `*_paired/paired_state.json` ghi counters transitions, checkpoint/hash riêng
+mỗi arm, source commit/manifest, expert hash, selection/runtime và lịch chunk.
+Counters chỉ tăng sau worker thành công + verified checkpoint copy + atomic JSON.
+
+Resume sang session mới phải attach toàn bộ thư mục paired (initial, selected,
+state, checkpoint hai arm), dùng output mới. Notebook pin source commit và bỏ
+smoke/sweep khi resume. Chunk chưa commit không được tính; arm còn thiếu chạy
+trước. Torch RNG được restore; simulator reset mỗi chunk, không exact restore.
+Chi tiết lệnh và budget session ở README mục3. Không đổi reward/D batch/LR/gate.
+
+Endpoint người dùng gửi `pilot01_airl_eval_seed42006.json`:80/100 success,
+18 fail linear RMSE,2 fail yaw RMSE,0 falls; FAIL success95%, không phải exception.
+Thiếu endpoint PPO cùng protocol; chưa có kết quả train dài.

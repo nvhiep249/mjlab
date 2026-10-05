@@ -8,6 +8,9 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Long Kaggle paired PPO/AIRL continuation with verified per-arm checkpoints,
+  portable state, chunk accounting, and session-budget recovery.
+
 - Standalone AIRL reward export/load preserves g/h, gamma and normalization,
   with fixed inference and a Kaggle README example adding f to task rewards.
 - Kaggle AIRL notebook clones a dedicated GitHub branch, verifies source and
@@ -46,6 +49,8 @@ Added
 
 Changed
 ^^^^^^^
+
+- Cloud PPO checkpoints save and restore Torch RNG on paired continuation.
 
 - The repository README explains Kaggle setup, continuation budgets, artifact
   export and the boundary between online AIRL and frozen reward integration.
