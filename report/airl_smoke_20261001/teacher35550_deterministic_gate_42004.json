@@ -1,0 +1,59 @@
+{
+  "expert_policy": "deterministic",
+  "checkpoint": "D:\\Robotics\\mjlab\\experiments\\g1_velocity\\expert_v2_finetune\\model_35550.pt",
+  "checkpoint_sha256": "6fc1028d35ad7b56bb3389ed8a6b014fe7083e72d22f1db8ca4d73af37bd94c0",
+  "config": {
+    "checkpoint_file": "experiments\\g1_velocity\\expert_v2_finetune\\model_35550.pt",
+    "output_file": "report\\airl_smoke_20261001\\teacher35550_deterministic_gate_42004.json",
+    "task": "Mjlab-Velocity-Flat-Unitree-G1",
+    "episodes_per_command": 100,
+    "seed": 42004,
+    "device": "cuda:0",
+    "stochastic_policy": false,
+    "lin_vel_x": [
+      1.2
+    ],
+    "lin_vel_y": [
+      0.0
+    ],
+    "ang_vel_z": [
+      0.0
+    ],
+    "gate": {
+      "min_success_rate": 0.95,
+      "max_linear_rmse": 0.25,
+      "max_yaw_rmse": 0.2,
+      "min_upright_mean": 0.97
+    }
+  },
+  "bins": [
+    {
+      "command": [
+        1.2,
+        0.0,
+        0.0
+      ],
+      "success_rate": 0.97,
+      "success_count": 97,
+      "episode_count": 100,
+      "timeout_rate": 1.0,
+      "fall_rate": 0.0,
+      "mean_actual_vx": 1.1674168109893799,
+      "linear_rmse": 0.21457774937152863,
+      "yaw_rmse": 0.1747954934835434,
+      "upright_mean": 0.9962365031242371,
+      "failure_breakdown": {
+        "success": 97,
+        "fall": 0,
+        "linear_rmse": 1,
+        "yaw_rmse": 2,
+        "upright": 0
+      }
+    }
+  ],
+  "gate": {
+    "passed": true,
+    "failed_bins": [],
+    "failures": {}
+  }
+}

@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import mujoco
 import numpy as np
@@ -383,6 +383,19 @@ class ManagerBasedRlEnv:
     self.recorder_manager.record_post_reset(env_ids)
     return self.obs_buf, self.extras
 
+  def set_transition_capture(
+    self,
+    callback: Callable[["ManagerBasedRlEnv"], dict[str, torch.Tensor]] | None,
+  ) -> None:
+    """Opt in to cloned, true successor tensors in extras['transition'].
+
+    The callback runs after commands and observations advance, before auto-reset.
+    Read ``obs_buf`` directly: recomputing observations can advance delay buffers.
+    Steps with auto-reset add a pre-reset forward/sense call. None restores the
+    normal step path. Captured terminated/truncated flags remain independent.
+    """
+    self._transition_capture = callback
+
   def step(self, action: torch.Tensor) -> types.VecEnvStepReturn:
     """Run one environment step: apply actions, simulate, compute RL signals.
 
@@ -464,6 +477,21 @@ class ManagerBasedRlEnv:
     if "interval" in self.event_manager.available_modes:
       self.event_manager.apply(mode="interval", dt=self.step_dt)
 
+    capture = getattr(self, "_transition_capture", None)
+    self.extras.pop("transition", None)
+    if capture is not None:
+      # Advance observations once before reset, including command resampling.
+      # Reset rows are backfilled below; ordinary rows keep this exact frame.
+      self.sim.forward()
+      self.command_manager.compute(dt=self.step_dt)
+      self.sim.sense()
+      self.obs_buf = self.observation_manager.compute(update_history=True)
+      self.extras["transition"] = {
+        name: value.clone() for name, value in capture(self).items()
+      }
+      self.extras["transition"]["terminated"] = self.reset_terminated.clone()
+      self.extras["transition"]["truncated"] = self.reset_time_outs.clone()
+
     # Reset envs that terminated/timed-out and log the episode info.
     reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
     if self.cfg.auto_reset and len(reset_env_ids) > 0:
@@ -475,11 +503,15 @@ class ManagerBasedRlEnv:
     # qpos/qvel for every env. For non-reset envs this resolves the
     # one-substep staleness left by mj_step; for reset envs it picks up
     # the freshly written reset state.
-    self.sim.forward()
+    if capture is None or (self.cfg.auto_reset and len(reset_env_ids) > 0):
+      self.sim.forward()
 
     # Pass dt=0 for freshly reset envs so their command timers start full,
     # matching reset().
-    if self.cfg.auto_reset and len(reset_env_ids) > 0:
+    if capture is not None:
+      if self.cfg.auto_reset and len(reset_env_ids) > 0:
+        self.command_manager.compute(dt=0.0, env_ids=reset_env_ids)
+    elif self.cfg.auto_reset and len(reset_env_ids) > 0:
       command_dt = self._command_dt
       command_dt.fill_(self.step_dt)
       command_dt[reset_env_ids] = 0.0
@@ -487,8 +519,18 @@ class ManagerBasedRlEnv:
     else:
       self.command_manager.compute(dt=self.step_dt)
 
-    self.sim.sense()
-    self.obs_buf = self.observation_manager.compute(update_history=True)
+    if capture is None or (self.cfg.auto_reset and len(reset_env_ids) > 0):
+      self.sim.sense()
+    if capture is None:
+      self.obs_buf = self.observation_manager.compute(update_history=True)
+    elif self.cfg.auto_reset and len(reset_env_ids) > 0:
+      reset_obs = self.observation_manager.compute(
+        update_history=True, env_ids=reset_env_ids
+      )
+      self.obs_buf = self._merge_reset_observations(
+        self.obs_buf, reset_obs, reset_env_ids
+      )
+      self.observation_manager._obs_buffer = self.obs_buf
 
     if self.cfg.auto_reset and len(reset_env_ids) > 0:
       self.recorder_manager.record_post_reset(reset_env_ids)
@@ -507,6 +549,22 @@ class ManagerBasedRlEnv:
 
   def get_observations(self) -> dict:
     return self.observation_manager.compute()
+
+  @staticmethod
+  def _merge_reset_observations(
+    previous: dict, refreshed: dict, env_ids: torch.Tensor
+  ) -> dict:
+    """Keep the captured ordinary frame when reset recomputes noisy terms."""
+    merged = {}
+    for name, value in previous.items():
+      if isinstance(value, dict):
+        merged[name] = ManagerBasedRlEnv._merge_reset_observations(
+          value, refreshed[name], env_ids
+        )
+      else:
+        merged[name] = value.clone()
+        merged[name][env_ids] = refreshed[name][env_ids]
+    return merged
 
   def render(self) -> np.ndarray | None:
     if self.render_mode == "human" or self.render_mode is None:

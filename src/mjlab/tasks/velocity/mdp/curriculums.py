@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, TypedDict, cast
 
 import torch
+from typing_extensions import NotRequired
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
-from .velocity_command import UniformVelocityCommandCfg
+from .velocity_command import UniformVelocityCommandCfg, select_target_speed_values
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -20,6 +21,7 @@ class VelocityStage(TypedDict):
   lin_vel_x: tuple[float, float] | None
   lin_vel_y: tuple[float, float] | None
   ang_vel_z: tuple[float, float] | None
+  frontier_velocity_prob: NotRequired[float | None]
 
 
 def terrain_levels_vel(
@@ -106,11 +108,28 @@ def commands_vel(
         cfg.ranges.lin_vel_y = stage["lin_vel_y"]
       if "ang_vel_z" in stage and stage["ang_vel_z"] is not None:
         cfg.ranges.ang_vel_z = stage["ang_vel_z"]
-  return {
+      if (
+        "frontier_velocity_prob" in stage
+        and stage["frontier_velocity_prob"] is not None
+      ):
+        cfg.frontier_velocity_prob = stage["frontier_velocity_prob"]
+  metrics = {
+    "common_step_counter": torch.tensor(env.common_step_counter),
     "lin_vel_x_min": torch.tensor(cfg.ranges.lin_vel_x[0]),
     "lin_vel_x_max": torch.tensor(cfg.ranges.lin_vel_x[1]),
     "lin_vel_y_min": torch.tensor(cfg.ranges.lin_vel_y[0]),
     "lin_vel_y_max": torch.tensor(cfg.ranges.lin_vel_y[1]),
     "ang_vel_z_min": torch.tensor(cfg.ranges.ang_vel_z[0]),
     "ang_vel_z_max": torch.tensor(cfg.ranges.ang_vel_z[1]),
+    "frontier_velocity_prob": torch.tensor(getattr(cfg, "frontier_velocity_prob", 0.0)),
   }
+  if getattr(cfg, "target_speed_command_grid", False) and getattr(
+    cfg, "target_speed_curriculum", False
+  ):
+    target_speeds = select_target_speed_values(
+      env.common_step_counter,
+      cfg.target_speed_curriculum_stages,
+    )
+    metrics["target_speed_min"] = torch.tensor(min(target_speeds))
+    metrics["target_speed_max"] = torch.tensor(max(target_speeds))
+  return metrics

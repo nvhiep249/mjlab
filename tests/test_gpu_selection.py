@@ -126,3 +126,20 @@ def test_select_gpus_mig_uuids():
   selected, num = select_gpus([0])
   assert selected == ["MIG-GPU-abc-123"]
   assert num == 1
+
+
+def test_select_gpus_reports_missing_cuda_runtime(monkeypatch):
+  """Explains when a GPU was requested from a CPU-only PyTorch environment."""
+  os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+  monkeypatch.setattr("torch.cuda.device_count", lambda: 0)
+
+  with pytest.raises(RuntimeError, match="no CUDA devices were detected"):
+    select_gpus([0])
+
+
+def test_select_gpus_reports_out_of_range_visible_index():
+  """Explains invalid indices relative to CUDA_VISIBLE_DEVICES."""
+  os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+
+  with pytest.raises(ValueError, match="Available indices: 0..0"):
+    select_gpus([1])

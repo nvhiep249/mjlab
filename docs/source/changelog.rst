@@ -5,15 +5,66 @@ Changelog
 Upcoming version (not yet released)
 -----------------------------------
 
+Added
+^^^^^
+
+- Kaggle AIRL notebook clones a dedicated GitHub branch, verifies source and
+  qualified expert/checkpoint hashes, and records the exact source commit.
+- Private Kaggle AIRL source bundles, isolated single-GPU environment/minibatch
+  sweeps with device-memory headroom, and matched PPO/AIRL continuation launchers.
+- Opt-in frozen GAIL reward cap with pelvis/yaw shaping, separate raw reward
+  logging, and reward-settings validation on continuation.
+- Explicit frozen GAIL continuation checks discriminator equality before full
+  PPO restore and supports the recorded two-stage curriculum extension.
+- Frozen GAIL pilot launcher supports a fresh PPO control using the same
+  curriculum, seed and training budget.
+- GAIL curriculum extension accepts explicit dataset and teacher gate paths,
+  validates the dataset against the source run, and checks discriminator optimizer
+  availability before continuation.
+- Added frozen GAIL discriminator rewards for freshly initialized PPO runs,
+  loading discriminator weights and feature statistics without restoring PPO.
+- Added opt-in state-only AIRL shaping for G1 PPO, stochastic expert collection
+  with actor inputs and pre-reset successors, episode holdout, and checked
+  reward/optimizer checkpoint resume.
+- AIRL expert collection also supports deterministic raw policy means, with
+  explicit action-mode metadata and a matching expert gate.
+- Added opt-in command-matched expert sampling and a checked GAIL curriculum
+  launcher that replays the recorded PPO stop/resume schedule from scratch.
+- Expert collection supports explicit forward speeds with checkpoint hash and
+  current gate coverage validation.
+- Added ``gail-collect-expert`` to collect command-conditioned GAIL transitions
+  from a trained velocity policy.
+- Added curriculum-boundary PPO/GAIL ablations with exact-checkpoint branching,
+  stage-specific expert collection, and post-transition learning metrics.
+- Added command-binned expert qualification and schema-v2 balanced expert datasets
+  with trajectory, termination, command-range, and checkpoint provenance fields.
+- Added a controlled G1 PPO/GAIL ablation launcher with GPU-utilization calibration,
+  task-only learning-speed metrics, separate GAIL TensorBoard metrics, and periodic
+  GAIL checkpoints.
+
 Changed
 ^^^^^^^
 
+- AIRL rollouts reuse PPO sample densities, reward component forwards, and normal
+  preallocated transition storage while batching scalar diagnostics on the device.
+- Target-speed training can now progress through configurable forward-speed
+  stages instead of exposing a randomly initialized policy to the final grid
+  immediately. Expert evaluation now reports actual forward velocity, timeout
+  rate, and fall rate, and only counts tracked, upright timeouts as successes.
+- GAIL velocity discriminators now use normalized 68-D body-local states instead
+  of raw world-frame qpos/qvel. Legacy expert datasets are rejected so environment
+  layout and root-position shortcuts cannot silently dominate imitation reward.
 - Bumped ``rsl-rl-lib`` from 5.4.2 to 5.5.0. This update removes the ``logger_type``
   attribute of the ``rsl_rl.utils.Logger``, so code that previously checked
   ``logger.logger_type`` must instead check the type of ``logger.writer``.
 
 Fixed
 ^^^^^
+
+- Fixed-command expert collection and evaluation now pin commands through
+  resampling and reset before actor observations are constructed.
+- Snapshot GAIL rollout commands so environment resets cannot relabel earlier
+  state-action transitions used to train the discriminator.
 
 - Capped ``wandb`` below 0.29, which removed the ``start_method`` setting still passed
   by ``rsl-rl-lib`` and crashed training runs launched with ``--logger wandb``.

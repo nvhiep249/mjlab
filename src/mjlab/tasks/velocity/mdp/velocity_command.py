@@ -21,6 +21,48 @@ if TYPE_CHECKING:
   from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 
+def sample_frontier_velocity_x(
+  random_values: torch.Tensor,
+  continuous_range: tuple[float, float],
+  frontier_probability: float,
+  frontier_values: tuple[float, ...],
+) -> torch.Tensor:
+  """Sample continuous velocity with optional explicit frontier mass."""
+  if not 0.0 <= frontier_probability <= 1.0:
+    raise ValueError("frontier_velocity_prob must be between 0 and 1")
+  if frontier_probability > 0.0 and not frontier_values:
+    raise ValueError("frontier_velocity_values must not be empty")
+  values = random_values.uniform_(*continuous_range)
+  frontier_mask = torch.rand_like(random_values) < frontier_probability
+  if frontier_mask.any():
+    choices = torch.tensor(frontier_values, device=random_values.device)
+    indices = torch.randint(
+      len(choices), (int(frontier_mask.sum()),), device=random_values.device
+    )
+    values[frontier_mask] = choices[indices]
+  return values
+
+
+def select_target_speed_values(
+  common_step_counter: int,
+  stages: tuple[tuple[int, tuple[float, ...]], ...],
+) -> tuple[float, ...]:
+  """Select the latest target-speed curriculum stage reached by the runner."""
+  if not stages or stages[0][0] != 0:
+    raise ValueError("target_speed_curriculum_stages must start at step 0")
+  selected = stages[0][1]
+  previous_step = -1
+  for step, values in stages:
+    if step <= previous_step:
+      raise ValueError("target_speed_curriculum_stages must be strictly ordered")
+    if not values:
+      raise ValueError("target-speed curriculum stages must not be empty")
+    previous_step = step
+    if common_step_counter >= step:
+      selected = values
+  return selected
+
+
 class UniformVelocityCommand(CommandTerm):
   cfg: UniformVelocityCommandCfg
 
@@ -36,6 +78,7 @@ class UniformVelocityCommand(CommandTerm):
 
     self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
     self.vel_command_w = torch.zeros(self.num_envs, 3, device=self.device)
+    self._pinned_commands: torch.Tensor | None = None
     self.heading_target = torch.zeros(self.num_envs, device=self.device)
     self.heading_error = torch.zeros(self.num_envs, device=self.device)
     self.is_heading_env = torch.zeros(
@@ -57,6 +100,32 @@ class UniformVelocityCommand(CommandTerm):
   def command(self) -> torch.Tensor:
     return self.vel_command_b
 
+  def pin_commands(self, commands: torch.Tensor | None) -> None:
+    """Keep body-local commands fixed across timer resampling and resets.
+
+    Passing None restores the configured sampling distribution.
+    """
+    if commands is None:
+      self._pinned_commands = None
+      return
+    if commands.shape != self.vel_command_b.shape:
+      raise ValueError(f"Pinned commands must have shape {self.vel_command_b.shape}")
+    if not torch.isfinite(commands).all():
+      raise ValueError("Pinned commands must be finite")
+    self._pinned_commands = commands.to(self.vel_command_b).clone()
+    self._apply_pinned_commands()
+
+  def _apply_pinned_commands(self, env_ids: torch.Tensor | None = None) -> None:
+    commands = self._pinned_commands
+    assert commands is not None
+    ids = slice(None) if env_ids is None else env_ids
+    self.vel_command_b[ids] = commands[ids]
+    self.vel_command_w[ids] = commands[ids]
+    self.is_heading_env[ids] = False
+    self.is_standing_env[ids] = False
+    self.is_world_env[ids] = False
+    self.is_forward_env[ids] = False
+
   def _update_metrics(self) -> None:
     max_command_time = self.cfg.resampling_time_range[1]
     max_command_step = max_command_time / self._env.step_dt
@@ -72,8 +141,36 @@ class UniformVelocityCommand(CommandTerm):
     )
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
+    if getattr(self, "_pinned_commands", None) is not None:
+      self._apply_pinned_commands(env_ids)
+      return
+    if self.cfg.target_speed_command_grid:
+      target_speeds = (1.2, 1.35, 1.5)
+      if getattr(self.cfg, "target_speed_curriculum", False):
+        target_speeds = select_target_speed_values(
+          self._env.common_step_counter,
+          self.cfg.target_speed_curriculum_stages,
+        )
+      targets = torch.tensor(
+        tuple((speed, 0.0, 0.0) for speed in target_speeds),
+        dtype=self.vel_command_b.dtype,
+        device=self.device,
+      )
+      commands = targets[env_ids.remainder(len(targets))]
+      self.vel_command_b[env_ids] = commands
+      self.vel_command_w[env_ids] = commands
+      self.is_heading_env[env_ids] = False
+      self.is_standing_env[env_ids] = False
+      self.is_world_env[env_ids] = False
+      self.is_forward_env[env_ids] = False
+      return
     r = torch.empty(len(env_ids), device=self.device)
-    self.vel_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
+    self.vel_command_b[env_ids, 0] = sample_frontier_velocity_x(
+      r,
+      self.cfg.ranges.lin_vel_x,
+      getattr(self.cfg, "frontier_velocity_prob", 0.0),
+      getattr(self.cfg, "frontier_velocity_values", (-2.0, 2.0, 3.0)),
+    )
     self.vel_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
     self.vel_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z)
     if self.cfg.heading_command:
@@ -113,6 +210,9 @@ class UniformVelocityCommand(CommandTerm):
     return extras
 
   def _update_command(self, env_ids: torch.Tensor | None = None) -> None:
+    if getattr(self, "_pinned_commands", None) is not None:
+      self._apply_pinned_commands(env_ids)
+      return
     # Pure function of the current state; refreshing all envs is safe.
     del env_ids
     if self.cfg.heading_command:
@@ -202,6 +302,8 @@ class UniformVelocityCommand(CommandTerm):
     self, dt: float | torch.Tensor, env_ids: torch.Tensor | None = None
   ) -> None:
     super().compute(dt, env_ids)
+    if self._pinned_commands is not None:
+      return
     if self._joystick_enabled is not None and self._joystick_enabled.value:
       assert self._joystick_get_env_idx is not None
       idx = self._joystick_get_env_idx()
@@ -298,6 +400,20 @@ class UniformVelocityCommandCfg(CommandTermCfg):
   init_velocity_prob: float = 0.0
   """Probability that an env starts its episode already moving at its sampled
   planar command velocity. Applied on reset only."""
+  frontier_velocity_prob: float = 0.0
+  """Probability of sampling a configured frontier ``lin_vel_x`` value."""
+  frontier_velocity_values: tuple[float, ...] = (-2.0, 2.0, 3.0)
+  """Discrete forward-velocity values used by the coverage experiment."""
+  target_speed_command_grid: bool = False
+  """Cycle the fixed 1.2, 1.35, and 1.5 m/s forward target grid."""
+  target_speed_curriculum: bool = False
+  """Progress the target grid through easier forward-speed stages."""
+  target_speed_curriculum_stages: tuple[tuple[int, tuple[float, ...]], ...] = (
+    (0, (0.3, 0.5, 0.8)),
+    (4_800, (0.6, 0.9, 1.2)),
+    (12_000, (1.0, 1.1, 1.2)),
+  )
+  """Pairs of common-step threshold and forward speeds used by the curriculum."""
 
   @dataclass
   class Ranges:

@@ -67,6 +67,11 @@ def select_gpus(
     import torch.cuda
 
     available_gpus: list[GpuId] = list(range(torch.cuda.device_count()))
+    if not available_gpus:
+      raise RuntimeError(
+        "GPU training was requested, but no CUDA devices were detected. "
+        "Install a CUDA-enabled PyTorch build or pass --gpu-ids None for CPU mode."
+      )
 
   # Map gpu_ids indices to actual GPU IDs.
   selected: list[GpuId]
@@ -74,6 +79,12 @@ def select_gpus(
     selected = available_gpus
   else:
     # gpu_ids are indices into available_gpus.
+    invalid_ids = [i for i in gpu_ids if i < 0 or i >= len(available_gpus)]
+    if invalid_ids:
+      raise ValueError(
+        f"Invalid GPU indices {invalid_ids}. "
+        f"Available indices: 0..{len(available_gpus) - 1}."
+      )
     selected = [available_gpus[i] for i in gpu_ids]
 
   num_gpus = len(selected)

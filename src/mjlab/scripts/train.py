@@ -26,6 +26,8 @@ from mjlab.utils.wrappers import VideoRecorder
 class TrainConfig:
   env: ManagerBasedRlEnvCfg
   agent: RslRlBaseRunnerCfg
+  checkpoint_file: Path | None = None
+  """Optional exact local checkpoint to load instead of resolving a run regex."""
   registry_name: str | None = None
   video: bool = False
   video_length: int = 200
@@ -114,7 +116,13 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   log_root_path = log_dir.parent  # Go up from specific run dir to experiment dir.
 
   resume_path: Path | None = None
-  if cfg.agent.resume:
+  if cfg.checkpoint_file is not None:
+    if cfg.wandb_run_path is not None:
+      raise ValueError("checkpoint_file and wandb_run_path are mutually exclusive")
+    resume_path = cfg.checkpoint_file.resolve()
+    if not resume_path.is_file():
+      raise FileNotFoundError(f"Checkpoint file not found: {resume_path}")
+  elif cfg.agent.resume:
     if cfg.wandb_run_path is not None:
       # Load checkpoint from W&B.
       resume_path, was_cached = get_wandb_checkpoint_path(

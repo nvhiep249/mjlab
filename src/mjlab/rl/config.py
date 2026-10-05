@@ -1,6 +1,7 @@
 """RSL-RL configuration."""
 
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, Literal, Tuple
 
 
@@ -82,6 +83,91 @@ class RslRlPpoAlgorithmCfg:
 
 
 @dataclass
+class GailCfg:
+  """Optional GAIL reward configuration for controlled PPO ablations."""
+
+  enabled: bool = False
+  dataset_path: str = ""
+  weight: float = 0.01
+  learning_rate: float = 3e-4
+  updates: int = 1
+  frozen: bool = False
+  """Use a fixed discriminator reward with a freshly initialized PPO policy."""
+  discriminator_checkpoint: str = ""
+  """Checkpoint supplying only discriminator weights and feature statistics."""
+  frozen_reward_cap: float | None = None
+  """Opt-in cap and pelvis/yaw gate for the frozen reward (pre-step state)."""
+  command_name: str = "twist"
+  match_expert_commands: bool = False
+  """Match expert command frequencies to each discriminator policy minibatch."""
+  input_mode: Literal["state_action", "state_transition"] = "state_action"
+  """Discriminator input contract. PPO remains the policy optimizer in both modes."""
+
+  def validate(self) -> None:
+    if not self.enabled:
+      return
+    if not self.dataset_path:
+      raise ValueError("GAIL dataset_path is required when GAIL is enabled")
+    if self.frozen and not self.discriminator_checkpoint:
+      raise ValueError("Frozen GAIL requires discriminator_checkpoint")
+    if self.discriminator_checkpoint and not self.frozen:
+      raise ValueError("discriminator_checkpoint requires frozen GAIL")
+    if self.frozen and self.input_mode != "state_action":
+      raise ValueError("Frozen GAIL currently requires state_action input_mode")
+    if self.frozen_reward_cap is not None:
+      if (
+        not self.frozen
+        or not isfinite(self.frozen_reward_cap)
+        or self.frozen_reward_cap <= 0
+      ):
+        raise ValueError(
+          "frozen_reward_cap requires frozen GAIL and a finite positive cap"
+        )
+    if self.weight <= 0:
+      raise ValueError("GAIL weight must be positive")
+    if self.learning_rate <= 0:
+      raise ValueError("GAIL learning_rate must be positive")
+    if self.updates < 1:
+      raise ValueError("GAIL updates must be at least 1")
+    if self.input_mode not in {"state_action", "state_transition"}:
+      raise ValueError(f"Unsupported GAIL input_mode: {self.input_mode!r}")
+
+
+@dataclass
+class AirlCfg:
+  """Optional state-only AIRL reward; provisional weight for smoke tests."""
+
+  enabled: bool = False
+  dataset_path: str = ""
+  weight: float = 0.01
+  learning_rate: float = 3e-4
+  updates: int = 1
+  batch_size: int = 1024
+  hidden_dims: tuple[int, ...] = (256, 256)
+  command_name: str = "twist"
+  match_expert_commands: bool = False
+  allow_unqualified_expert: bool = False
+  """Explicit smoke-only escape from the qualified expert gate."""
+
+  def validate(self) -> None:
+    if not self.enabled:
+      return
+    if not self.dataset_path:
+      raise ValueError("AIRL dataset_path is required when AIRL is enabled")
+    if (
+      not isfinite(self.weight)
+      or not isfinite(self.learning_rate)
+      or self.weight <= 0
+      or self.learning_rate <= 0
+    ):
+      raise ValueError("AIRL weight and learning_rate must be positive")
+    if self.updates < 1 or self.batch_size < 1:
+      raise ValueError("AIRL updates and batch_size must be at least 1")
+    if not self.hidden_dims or any(size < 1 for size in self.hidden_dims):
+      raise ValueError("AIRL hidden_dims must contain positive sizes")
+
+
+@dataclass
 class RslRlBaseRunnerCfg:
   seed: int = 42
   """The seed for the experiment. Default is 42."""
@@ -143,3 +229,7 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
   """The critic configuration."""
   algorithm: RslRlPpoAlgorithmCfg = field(default_factory=RslRlPpoAlgorithmCfg)
   """The algorithm configuration."""
+  gail: GailCfg = field(default_factory=GailCfg)
+  """Optional imitation reward. Disabled by default for a PPO control run."""
+  airl: AirlCfg = field(default_factory=AirlCfg)
+  """Optional AIRL reward; mutually exclusive with GAIL in the runner."""

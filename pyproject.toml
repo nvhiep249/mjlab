@@ -50,6 +50,7 @@ dependencies = [
   "tensorboard>=2.20.0",
   "onnxscript>=0.5.4",
   "wandb>=0.22.3,<0.29",
+  "setuptools<80",
 ]
 
 [project.urls]
@@ -61,6 +62,10 @@ train = "mjlab.scripts.train:main"
 play = "mjlab.scripts.play:main"
 demo = "mjlab.scripts.demo:main"
 list-envs = "mjlab.scripts.list_envs:main"
+gail-ablation = "mjlab.scripts.gail_ablation:main"
+gail-collect-expert = "mjlab.scripts.gail_collect_expert:main"
+gail-curriculum-ablation = "mjlab.scripts.gail_curriculum_ablation:main"
+gail-evaluate-expert = "mjlab.scripts.gail_evaluate_expert:main"
 viz-nan = "mjlab.scripts.nan_viz:main"
 export-scene = "mjlab.scripts.export_scene:main"
 

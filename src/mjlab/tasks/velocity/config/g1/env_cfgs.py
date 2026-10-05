@@ -218,3 +218,30 @@ def unitree_g1_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_cmd.ranges.ang_vel_z = (-0.7, 0.7)
 
   return cfg
+
+
+def unitree_g1_flat_airl_teacher_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """PPO teacher pilot at the AIRL MVP command, with unchanged rewards."""
+  cfg = unitree_g1_flat_env_cfg(play=play)
+  cfg.curriculum = {}
+  command = cfg.commands["twist"]
+  assert isinstance(command, UniformVelocityCommandCfg)
+  command.heading_command = False
+  command.ranges.heading = None
+  command.rel_standing_envs = 0.0
+  command.rel_heading_envs = 0.0
+  command.target_speed_command_grid = False
+  command.target_speed_curriculum = False
+  command.ranges.lin_vel_x = (1.2, 1.2)
+  command.ranges.lin_vel_y = (0.0, 0.0)
+  command.ranges.ang_vel_z = (0.0, 0.0)
+  return cfg
+
+
+def unitree_g1_flat_coverage_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """Opt-in H-COVERAGE-1 command sampler with unchanged PPO/reward config."""
+  cfg = unitree_g1_flat_env_cfg(play=play)
+  if not play:
+    stages = cfg.curriculum["command_vel"].params["velocity_stages"]
+    stages[-1]["frontier_velocity_prob"] = 0.5
+  return cfg
