@@ -1,12 +1,14 @@
 """Hardware-free checks for the cloud selection and matched sample budgets."""
 
 import ast
+import builtins
 import hashlib
 import importlib.util
 import json
 import math
 import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -212,3 +214,236 @@ def test_notebook_rejects_wrong_kaggle_artifacts_before_clone(tmp_path, tampered
   else:
     exec(cell, namespace)
     assert (tmp_path / "test_data_manifest.json").is_file()
+
+
+@pytest.fixture
+def pilot_request(tmp_path):
+  input_dir = tmp_path / "input"
+  input_dir.mkdir()
+  (input_dir / cloud.DATASET).write_bytes(b"qualified expert")
+  common = input_dir / cloud.CHECKPOINT
+  common.write_bytes(b"common PPO checkpoint")
+  selected = {
+    "ok": True,
+    "envs": 16384,
+    "minibatches": 8,
+    "gpu": "Tesla T4",
+    "cuda": "12.8",
+    "packages": {"torch": "2.9.0+cu128"},
+    "total_device_mib": 14911.6875,
+  }
+  selected_file = tmp_path / "selected.json"
+  selected_file.write_text(json.dumps(selected))
+  args = SimpleNamespace(
+    input=input_dir,
+    checkpoint=common,
+    selected=selected_file,
+    output=tmp_path / "pilot_ppo",
+    arm="ppo",
+    gpu=0,
+    seed=42,
+    resume=False,
+    transitions=23592960,
+    reuse_completed=True,
+    restart_incomplete=True,
+  )
+  return args, selected
+
+
+def save_completed_pilot(args, selected):
+  run_dir = args.output / f"{args.arm}_n16384_mb8_seed42"
+  run_dir.mkdir(parents=True)
+  (run_dir / "model_1058.pt").write_bytes(b"final checkpoint")
+  row = {
+    **selected,
+    "arm": args.arm,
+    "seed": args.seed,
+    "checkpoint_sha256": cloud.sha256(args.checkpoint),
+    "additional_updates": 60,
+    "additional_transitions": args.transitions,
+    "resume": False,
+    "run_dir": str(run_dir),
+  }
+  cloud.write_json(args.output / "run_summary.json", row)
+  return row, run_dir
+
+
+@pytest.mark.parametrize("arm", ("ppo", "airl"))
+def test_completed_legacy_pilot_is_reused_without_training(
+  pilot_request, monkeypatch, arm
+):
+  args, selected = pilot_request
+  args.arm = arm
+  _, run_dir = save_completed_pilot(args, selected)
+  summary = args.output / "run_summary.json"
+  before = summary.read_bytes()
+
+  def no_training(*args, **kwargs):
+    pytest.fail("A completed arm must not start another worker")
+
+  monkeypatch.setattr(cloud.subprocess, "run", no_training)
+  cloud.train_arm(args)
+  assert summary.read_bytes() == before
+  assert (run_dir / "model_1058.pt").read_bytes() == b"final checkpoint"
+
+
+@pytest.mark.parametrize(
+  "fault", ("seed", "budget", "gpu", "checkpoint", "final", "source", "dataset", "path")
+)
+def test_completed_pilot_requires_matching_request_and_artifacts(pilot_request, fault):
+  args, selected = pilot_request
+  args.arm = "airl"
+  row, run_dir = save_completed_pilot(args, selected)
+  if fault == "seed":
+    args.seed += 1
+  elif fault == "budget":
+    args.transitions *= 2
+  elif fault == "gpu":
+    row["gpu"] = "Different GPU"
+  elif fault == "checkpoint":
+    args.checkpoint.write_bytes(b"different initializer")
+  elif fault == "final":
+    row["final_checkpoint_sha256"] = "bad"
+  elif fault == "source":
+    row["source_manifest_sha256"] = "bad"
+  elif fault == "dataset":
+    row["dataset_sha256"] = "bad"
+  else:
+    row["run_dir"] = str(args.output.parent / "outside")
+  cloud.write_json(args.output / "run_summary.json", row)
+  with pytest.raises(ValueError):
+    cloud.train_arm(args)
+  assert (run_dir / "model_1058.pt").read_bytes() == b"final checkpoint"
+
+
+def test_missing_final_checkpoint_is_not_treated_as_completed(pilot_request):
+  args, selected = pilot_request
+  _, run_dir = save_completed_pilot(args, selected)
+  (run_dir / "model_1058.pt").unlink()
+  with pytest.raises(FileNotFoundError, match="no checkpoint"):
+    cloud.train_arm(args)
+
+
+def test_incomplete_pilot_restarts_full_budget_and_preserves_old_run(
+  pilot_request, monkeypatch
+):
+  args, selected = pilot_request
+  old = args.output / "ppo_n16384_mb8_seed42/model_1000.pt"
+  old.parent.mkdir(parents=True)
+  old.write_bytes(b"partial checkpoint")
+  (args.output / "attempt_001").mkdir()
+  calls = []
+
+  def run(command, **kwargs):
+    calls.append(command)
+    output = Path(command[command.index("--output") + 1])
+    result = Path(command[command.index("--result") + 1])
+    run_dir = output / "ppo_n16384_mb8_seed42"
+    run_dir.mkdir(parents=True)
+    (run_dir / "model_1058.pt").write_bytes(b"final")
+    cloud.write_json(
+      result,
+      {
+        **selected,
+        "arm": "ppo",
+        "seed": 42,
+        "checkpoint_sha256": cloud.sha256(args.checkpoint),
+        "additional_updates": 60,
+        "additional_transitions": args.transitions,
+        "resume": False,
+        "run_dir": str(run_dir),
+      },
+    )
+
+  monkeypatch.setattr(cloud.subprocess, "run", run)
+  cloud.train_arm(args)
+  assert len(calls) == 1
+  command = calls[0]
+  assert command[command.index("--output") + 1] == str(args.output / "attempt_002")
+  assert command[command.index("--checkpoint") + 1] == str(args.checkpoint)
+  assert command[command.index("--updates") + 1] == "60"
+  assert "--resume" not in command
+  assert old.read_bytes() == b"partial checkpoint"
+  cloud.train_arm(args)  # Now the successful attempt is reused.
+  assert len(calls) == 1
+
+
+def test_incomplete_restart_and_completed_reuse_are_opt_in(pilot_request):
+  args, selected = pilot_request
+  args.output.mkdir()
+  sentinel = args.output / "old.log"
+  sentinel.write_bytes(b"old log")
+  args.restart_incomplete = False
+  with pytest.raises(FileExistsError, match="--restart-incomplete"):
+    cloud.train_arm(args)
+  assert sentinel.read_bytes() == b"old log"
+  save_completed_pilot(args, selected)
+  args.reuse_completed = False
+  with pytest.raises(FileExistsError, match="--reuse-completed"):
+    cloud.train_arm(args)
+
+
+def test_worker_rejects_existing_run_before_importing_gpu_stack(tmp_path, monkeypatch):
+  args = SimpleNamespace(output=tmp_path, arm="ppo", envs=16384, minibatches=8, seed=42)
+  (tmp_path / "ppo_n16384_mb8_seed42").mkdir()
+  original = builtins.__import__
+
+  def forbid_gpu_import(name, *args, **kwargs):
+    if name in ("torch", "warp"):
+      pytest.fail("Output collision must be detected before CUDA/Warp initialization")
+    return original(name, *args, **kwargs)
+
+  monkeypatch.setattr(builtins, "__import__", forbid_gpu_import)
+  with pytest.raises(FileExistsError, match="run already exists"):
+    cloud.worker(args)
+
+
+def test_notebook_pilot_cell_enables_preserving_reruns(tmp_path):
+  calls = []
+  namespace = {
+    "selected": {"median_update_seconds": 12, "rollout_transitions": 393216},
+    "TRANSITIONS": 23592960,
+    "OUTPUT": tmp_path,
+    "SESSION": "pilot01",
+    "INPUT": tmp_path / "input",
+    "COMMON": tmp_path / "common.pt",
+    "SELECTED": tmp_path / "selected.json",
+    "GPU": 0,
+    "cloud": lambda *args: calls.append(args),
+  }
+  exec(compile(notebook_cell("airl-11"), "pilot_cell", "exec"), namespace)
+  assert len(calls) == 2
+  for command in calls:
+    assert "--reuse-completed" in command and "--restart-incomplete" in command
+    assert command[command.index("--checkpoint") + 1] == namespace["COMMON"]
+    assert command[command.index("--transitions") + 1] == namespace["TRANSITIONS"]
+    assert "--resume" not in command
+
+
+def test_train_cli_reuses_completed_arm_without_gpu_initialization(pilot_request):
+  args, selected = pilot_request
+  save_completed_pilot(args, selected)
+  completed = subprocess.run(
+    [
+      sys.executable,
+      str(cloud.ROOT / "scripts/cloud/kaggle_airl.py"),
+      "train",
+      "--input",
+      str(args.input),
+      "--checkpoint",
+      str(args.checkpoint),
+      "--selected",
+      str(args.selected),
+      "--output",
+      str(args.output),
+      "--arm",
+      args.arm,
+      "--reuse-completed",
+      "--restart-incomplete",
+    ],
+    capture_output=True,
+    text=True,
+    check=True,
+  )
+  assert "Reusing completed ppo" in completed.stdout
+  assert "Warp" not in completed.stdout

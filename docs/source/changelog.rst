@@ -65,6 +65,9 @@ Changed
 Fixed
 ^^^^^
 
+- Rerunning the Kaggle pilot reuses matching completed arms and can restart an
+  incomplete arm in a new attempt directory while preserving prior checkpoints.
+  Direct worker output collisions are rejected before CUDA/Warp initialization.
 - Kaggle evaluations label common PPO baseline and trained endpoints separately
   from expert qualification, and print metrics and gate failure predicates.
 - Fixed-command expert collection and evaluation now pin commands through

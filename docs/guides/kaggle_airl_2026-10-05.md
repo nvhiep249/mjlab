@@ -127,6 +127,12 @@ runtime mới phải đo lại, không dùng selection từ GPU khác.
 Simulator reset khi resume; không có exact simulator-state restore. Không restart
 fresh khi missing checkpoint. Đổi SESSION/output để không ghi đè.
 
+Cell pilot hỗ trợ chạy lại bằng `--reuse-completed --restart-incomplete`:
+reuse chỉ khi summary/config/budget/runtime/checkpoint khớp; nếu chưa có summary
+thì chạy đủ budget từ checkpoint yêu cầu trong attempt mới, giữ mọi file cũ.
+Không tự chọn checkpoint partial hoặc bật resume. Summary sai/missing checkpoint
+vẫn dừng. Hướng dẫn nâng cấp runtime và ý nghĩa restart nằm trong [README](../../README.md).
+
 ## Kiểm chứng và giới hạn
 
 Nhánh GitHub đã qua 178 focused tests, Ruff format/check, Ty, Pyright và

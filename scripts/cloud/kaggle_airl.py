@@ -12,6 +12,7 @@ import importlib.metadata
 import json
 import math
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -142,6 +143,13 @@ def validate_selection_runtime(selected: dict, runtime: dict) -> None:
 
 def worker(args: argparse.Namespace) -> None:
   started = time.perf_counter()
+  # Reject a reused run before initializing CUDA/Warp or starting the monitor.
+  args.output.mkdir(parents=True, exist_ok=True)
+  run_dir = (
+    args.output / f"{args.arm}_n{args.envs}_mb{args.minibatches}_seed{args.seed}"
+  )
+  if run_dir.exists():
+    raise FileExistsError(f"Choose a new output folder; run already exists: {run_dir}")
   # Set visibility before importing Torch/Warp; AIRL has no DDP synchronization.
   os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
   if sys.platform == "linux":
@@ -261,12 +269,6 @@ def worker(args: argparse.Namespace) -> None:
       if not args.benchmark:
         return super().save(*positional, **keywords)
 
-  args.output.mkdir(parents=True, exist_ok=True)
-  run_dir = (
-    args.output / f"{args.arm}_n{args.envs}_mb{args.minibatches}_seed{args.seed}"
-  )
-  if run_dir.exists():
-    raise FileExistsError(f"Choose a new output folder; run already exists: {run_dir}")
   try:
     with patch.object(train, "load_runner_cls", return_value=MeasuredRunner):
       train.run_train(TASK, config, run_dir)
@@ -304,6 +306,11 @@ def worker(args: argparse.Namespace) -> None:
       "additional_updates": args.updates,
       "additional_transitions": args.updates * args.envs * STEPS,
       "resume": args.resume,
+      "dataset_sha256": sha256(args.input / DATASET) if args.arm == "airl" else None,
+      "source_manifest_sha256": source_manifest_hash(),
+      "final_checkpoint_sha256": sha256(latest_checkpoint(run_dir))
+      if not args.benchmark
+      else None,
     },
   )
 
@@ -351,6 +358,85 @@ def child_command(
   if not benchmark and getattr(args, "selected", None) is not None:
     command.extend(("--selected", str(args.selected)))
   return command
+
+
+def latest_checkpoint(run_dir: Path) -> Path:
+  paths = [
+    path
+    for path in run_dir.glob("model_*.pt")
+    if path.is_file() and re.fullmatch(r"model_\d+", path.stem)
+  ]
+  if not paths:
+    raise FileNotFoundError(f"Completed run has no checkpoint: {run_dir}")
+  return max(paths, key=lambda path: int(path.stem.split("_")[-1]))
+
+
+def source_manifest_hash() -> str | None:
+  manifest = ROOT / "scripts/cloud/kaggle_source_manifest.json"
+  return sha256(manifest) if manifest.is_file() else None
+
+
+def train_arm(args: argparse.Namespace) -> None:
+  selected = json.loads(args.selected.read_text())
+  if not selected.get("ok"):
+    raise ValueError("A successful measured selection is required")
+  updates = update_count(args.transitions, selected["envs"])
+  result = args.output / "run_summary.json"
+  if result.exists():
+    if not args.reuse_completed:
+      raise FileExistsError(f"Summary already exists; use --reuse-completed: {result}")
+    row = json.loads(result.read_text())
+    expected = {
+      "ok": True,
+      "arm": args.arm,
+      "envs": selected["envs"],
+      "minibatches": selected["minibatches"],
+      "seed": args.seed,
+      "checkpoint_sha256": sha256(args.checkpoint),
+      "additional_updates": updates,
+      "additional_transitions": args.transitions,
+      "resume": args.resume,
+    }
+    if not isinstance(row, dict):
+      raise ValueError(f"Invalid completed-run summary; preserve it: {result}")
+    for key, value in expected.items():
+      if row.get(key) != value:
+        raise ValueError(f"Completed run differs ({key}); choose a new output folder")
+    validate_selection_runtime(row, selected)
+    run_dir = Path(row["run_dir"]).resolve()
+    if not run_dir.is_relative_to(args.output.resolve()):
+      raise ValueError("Completed run directory must stay inside the requested output")
+    checkpoint = latest_checkpoint(run_dir)
+    provenance = {
+      "source_manifest_sha256": source_manifest_hash(),
+      "final_checkpoint_sha256": sha256(checkpoint),
+      "dataset_sha256": sha256(args.input / DATASET) if args.arm == "airl" else None,
+    }
+    for key, value in provenance.items():
+      if key in row and row[key] != value:
+        raise ValueError(f"Completed run differs ({key}); choose a new output folder")
+    if any(key not in row for key in provenance):
+      print("[INFO] Legacy summary: source/dataset/final hashes not all recorded")
+    print(f"[INFO] Reusing completed {args.arm}: {run_dir} ({updates} updates)")
+    return
+  output = args.output
+  if output.exists() and any(output.iterdir()):
+    if not args.restart_incomplete:
+      raise FileExistsError(
+        f"No completion summary in {output}; use --restart-incomplete to restart "
+        "the full budget from the requested checkpoint, preserving old files"
+      )
+    attempt = 1
+    while (output / f"attempt_{attempt:03d}").exists():
+      attempt += 1
+    output = output / f"attempt_{attempt:03d}"
+    print(
+      f"[INFO] Restarting incomplete {args.arm} from requested checkpoint: {output}"
+    )
+  command = child_command(
+    args, selected["envs"], selected["minibatches"], output, result, updates, False
+  )
+  subprocess.run(command, check=True)
 
 
 def sweep(args: argparse.Namespace) -> None:
@@ -442,6 +528,8 @@ def main() -> None:
     elif name == "train":
       command.add_argument("--selected", type=Path, required=True)
       command.add_argument("--transitions", type=int, default=23592960)
+      command.add_argument("--reuse-completed", action="store_true")
+      command.add_argument("--restart-incomplete", action="store_true")
     else:
       command.add_argument("--selected", type=Path)
       command.add_argument("--envs", type=int, required=True)
@@ -459,20 +547,7 @@ def main() -> None:
   elif args.command == "sweep":
     sweep(args)
   else:
-    selected = json.loads(args.selected.read_text())
-    if not selected.get("ok"):
-      raise ValueError("A successful measured selection is required")
-    updates = update_count(args.transitions, selected["envs"])
-    command = child_command(
-      args,
-      selected["envs"],
-      selected["minibatches"],
-      args.output,
-      args.output / "run_summary.json",
-      updates,
-      False,
-    )
-    subprocess.run(command, check=True)
+    train_arm(args)
 
 
 if __name__ == "__main__":

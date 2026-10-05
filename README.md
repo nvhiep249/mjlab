@@ -69,6 +69,40 @@ Runtime T4 bạn đã gửi: Torch `2.9.0+cu128`, CUDA `12.8`, Warp `1.14.0`, Mu
 
 Gate giữ success ≥95%, linear RMSE ≤0.25, yaw RMSE ≤0.20, upright ≥0.97. Dùng actual velocity, success, RMSE, upright và falls để kết luận chất lượng policy; reward hoặc D accuracy cao chưa chứng minh locomotion tốt.
 
+### Chạy lại cell pilot khi output đã tồn tại
+
+Cell pilot mới dùng `--reuse-completed --restart-incomplete`:
+
+- Có `run_summary.json` hoàn tất và checkpoint: kiểm tra arm, env/minibatches, seed, COMMON hash, budget, resume và runtime; khớp thì bỏ qua training arm đó.
+- Chưa có summary, output cũ có file: chạy lại đủ budget từ checkpoint yêu cầu trong `attempt_001`, `attempt_002`, …; giữ checkpoint/log cũ. Đây là restart, không tự resume checkpoint chạy dở.
+- Summary sai config hoặc thiếu checkpoint: dừng và yêu cầu output mới. Summary mới ghi thêm source/dataset/final-checkpoint hashes; summary cũ được báo thiếu các provenance hashes này, không sửa nội dung cũ.
+
+Endpoint và export vẫn đọc `run_summary.json` tại thư mục pilot, dùng `run_dir` trỏ tới attempt hoàn tất. Chạy các arm tuần tự, chờ subprocess hiện tại kết thúc trước khi chạy lại cell.
+
+Trong runtime đang có `SOURCE`, `COMMON`, `SELECTED` và kết quả sweep, cập nhật source rồi chạy lại **cell pilot đã sửa**; giữ SESSION và budget:
+
+```python
+subprocess.run(
+  ["git", "pull", "--ff-only", "origin", "feature/kaggle-airl-16k"],
+  cwd=SOURCE,
+  check=True,
+)
+updated_manifest = json.loads(
+  (SOURCE / "scripts/cloud/kaggle_source_manifest.json").read_text()
+)
+for relative, expected in updated_manifest["source_files"].items():
+  assert digest(SOURCE / relative) == expected, f"Source hash mismatch: {relative}"
+recovery_commit = subprocess.check_output(
+  ["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True
+).strip()
+(OUTPUT / f"{SESSION}_recovery_source.json").write_text(
+  json.dumps({"commit": recovery_commit, "purpose": "pilot recovery"}, indent=2)
+)
+print("Updated source:", recovery_commit)
+```
+
+Không cần chạy lại smoke hoặc sweep cho lỗi output trùng này. Notebook cũ phải thêm hai flags trên vào lệnh `cloud("train", ...)`; `git pull` chỉ cập nhật tool trên đĩa, không sửa cell đã import trong Kaggle.
+
 ## 3. Env, tăng tốc và budget
 
 Sweep: `16384 / 20480 / 24576 / 32768` env, `4 / 8` minibatches; giữ **24 steps/env**, **5 PPO epochs**, **1 D update với batch tối đa 1024 learner + 1024 expert/update**. Chọn candidate >16000 env, ≥15% VRAM trống; trong 3% throughput nhanh nhất ưu tiên peak VRAM thấp hơn. Đây là tối ưu trong các cấu hình đã đo.
